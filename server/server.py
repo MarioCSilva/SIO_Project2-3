@@ -2,11 +2,20 @@
 
 from twisted.web import server, resource
 from twisted.internet import reactor, defer
+from cryptography.hazmat.primitives.serialization import Encoding, ParameterFormat, PublicFormat, load_pem_private_key, load_pem_public_key
+from cryptography.hazmat.backends import default_backend  
+from cryptography.hazmat.primitives.asymmetric import rsa  
+from cryptography.hazmat.primitives import serialization  
 import logging
 import binascii
 import json
 import os
 import math
+import random
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import dh
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -29,7 +38,15 @@ CHUNK_SIZE = 1024 * 4
 
 class MediaServer(resource.Resource):
     isLeaf = True
+    def __init__(self):
+        self.ciphers=[]
+        self.digests=[]
+        self.ciphermodes=[]
+        # self.ciphers = ['AES','3DES','ChaCha20']
+        # self.digests = ['SHA-256','SHA-384','SHA-512']
+        # self.ciphermodes = ['CBC','GCM','ECB']
 
+        
     # Send the list of media files to clients
     def do_list(self, request):
 
@@ -101,7 +118,7 @@ class MediaServer(resource.Resource):
         offset = chunk_id * CHUNK_SIZE
 
         # Open file, seek to correct position and return the chunk
-        with open(os.path.join(CATALOG_BASE, media_item['file_name']), 'rb') as f:
+        with open(os.path.join('./', CATALOG_BASE, media_item['file_name']), 'rb') as f:
             f.seek(offset)
             data = f.read(CHUNK_SIZE)
 
@@ -121,14 +138,17 @@ class MediaServer(resource.Resource):
     # Handle a GET request
     def render_GET(self, request):
         logger.debug(f'Received request for {request.uri}')
+        print(request.uri)
 
         try:
             if request.path == b'/api/protocols':
                 return self.do_get_protocols(request)
-            #elif request.uri == 'api/key':
-            #...
+            elif request.uri == b'/api/key':
+            #...chave publica do server
+                request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                return json.dumps({"data":"key"}).encode("latin")
             #elif request.uri == 'api/auth':
-
+            #autenticaçao, later on..
             elif request.path == b'/api/list':
                 return self.do_list(request)
 
@@ -147,8 +167,64 @@ class MediaServer(resource.Resource):
     # Handle a POST request
     def render_POST(self, request):
         logger.debug(f'Received POST for {request.uri}')
-        request.setResponseCode(501)
-        return b''
+        print(request.uri)
+
+        try:
+            data = json.loads(request.content.getvalue())
+
+            if request.path == b'/api/hello':
+                print(data)
+                ciphers = data['ciphers']
+
+                # TODO: change cipher order
+                if 'ChaCha20' in ciphers:
+                    cipher = 'ChaCha20'
+                elif '3DES' in ciphers:
+                    cipher = '3DES'
+                elif 'AES' in ciphers:
+                    cipher = 'AES'
+                else:
+                    # Ciphers not supported
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'ciphers not supported'}, indent=4).encode('latin')
+
+                request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                parameters = dh.generate_parameters(generator=2, key_size=1024)
+
+                self.private_key = parameters.generate_private_key()
+                self.public_key = self.private_key.public_key()
+                pn = parameters.parameter_numbers()
+
+                print(self.public_key.__str__())
+
+                return json.dumps({
+                        'method':'HELLO',
+                        'cipher': cipher,
+                        'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
+                        'parameters': {
+                            'p': pn.p,
+                            'g': pn.g
+                        }
+                    }).encode("latin")
+
+            elif request.path == b'/api/key_exchange':
+                print(data)
+                # Only do this to use or send key
+                # load_pem_public_key(data['public_key'].encode())
+                self.client_public_key = data['public_key']
+                print("cli_pub_key",self.client_public_key)
+                print("sv_private_key",self.private_key)
+                print("sv_public_key",self.public_key)
+
+                return json.dumps({ 'method': 'ACK' }).encode("latin")
+            else:
+                request.responseHeaders.addRawHeader(b"content-type", b'text/plain')
+                return b'Methods: /api/cipher'
+        except Exception as e:
+            logger.exception(e)
+            request.setResponseCode(500)
+            request.responseHeaders.addRawHeader(b"content-type", b"text/plain")
+            return b''
 
 
 print("Server started")
@@ -157,3 +233,34 @@ print("URL is: http://IP:8080")
 s = server.Site(MediaServer())
 reactor.listenTCP(8080, s)
 reactor.run()
+
+'''
+>>> # Generate some parameters. These can be reused.
+>>> parameters = dh.generate_parameters(generator=2, key_size=2048)
+>>> # Generate a private key for use in the exchange.
+>>> private_key = parameters.generate_private_key()
+>>> # In a real handshake the peer_public_key will be received from the
+>>> # other party. For this example we'll generate another private key and
+>>> # get a public key from that. Note that in a DH handshake both peers
+>>> # must agree on a common set of parameters.
+>>> peer_public_key = parameters.generate_private_key().public_key()
+>>> shared_key = private_key.exchange(peer_public_key)
+>>> # Perform key derivation.
+>>> derived_key = HKDF(
+...     algorithm=hashes.SHA256(),
+...     length=32,
+...     salt=None,
+...     info=b'handshake data',
+... ).derive(shared_key)
+>>> # For the next handshake we MUST generate another private key, but
+>>> # we can reuse the parameters.
+>>> private_key_2 = parameters.generate_private_key()
+>>> peer_public_key_2 = parameters.generate_private_key().public_key()
+>>> shared_key_2 = private_key_2.exchange(peer_public_key_2)
+>>> derived_key_2 = HKDF(
+...     algorithm=hashes.SHA256(),
+...     length=32,
+...     salt=None,
+...     info=b'handshake data',
+... ).derive(shared_key_2)
+'''
