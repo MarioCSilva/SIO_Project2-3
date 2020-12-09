@@ -4,7 +4,9 @@ from twisted.web import server, resource
 from twisted.internet import reactor, defer
 from cryptography.hazmat.primitives.serialization import Encoding, ParameterFormat, PublicFormat, load_pem_private_key, load_pem_public_key
 from cryptography.hazmat.backends import default_backend  
-from cryptography.hazmat.primitives.asymmetric import rsa  
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives import serialization  
 import logging
 import binascii
@@ -118,7 +120,7 @@ class MediaServer(resource.Resource):
         offset = chunk_id * CHUNK_SIZE
 
         # Open file, seek to correct position and return the chunk
-        with open(os.path.join('./', CATALOG_BASE, media_item['file_name']), 'rb') as f:
+        with open(os.path.join(CATALOG_BASE, media_item['file_name']), 'rb') as f:
             f.seek(offset)
             data = f.read(CHUNK_SIZE)
 
@@ -226,6 +228,166 @@ class MediaServer(resource.Resource):
             request.responseHeaders.addRawHeader(b"content-type", b"text/plain")
             return b''
 
+    '''
+    ChaCha20 Decrypt
+    >>> decryptor = cipher.decryptor()
+    >>> decryptor.update(ct)
+
+    >>> import os
+    >>> from cryptography.hazmat.primitives.ciphers.modes import CBC
+    >>> iv = os.urandom(16)
+    >>> mode = CBC(iv)
+    '''
+
+    
+    # Encrypt data
+    def encrypt_data(self, data): 
+        ## Key maybe ain't this...
+        ## Check Key size..
+        key = self.public_key
+
+        nonce = os.urandom(16)
+        
+        if self.cipher == 'ChaCha20':
+            algorithm = algorithms.ChaCha20(key, nonce)
+        elif self.cipher == 'AES':
+            algorithm = algorithms.AES(key)
+        elif self.cipher == '3DES':
+            algorithm = algorithm.TripleDES(key)
+
+        ## Check IV size..
+        ## ChaCha mode is None maybe
+        iv = os.urandom(16)
+
+        if self.ciphermode == 'CBC':
+            mode = modes.CBC(iv)
+            #Padding is required when using this mode.      
+            padder = padding.PKCS7(algorithm.block_size).padder()
+            padded_data = padder.update(data)
+            data = padded_data + padder.finalize()
+
+        elif self.ciphermode == 'GCM':
+            mode = modes.GCM(iv)
+            # This mode does not require padding.
+
+        elif self.ciphermode == 'ECB':
+            mode = modes.ECB(iv)
+            #Padding is required when using this mode.
+            padder = padding.PKCS7(algorithm.block_size).padder()
+            padded_data = padder.update(data)
+            data = padded_data + padder.finalize()
+
+        
+        encryptor = Cipher(algorithm, mode).encryptor()
+        ct = encryptor.update(data) + encryptor.finalize()
+
+        return iv, ct, encryptor.tag
+
+
+
+    # Decrypt data
+    def decrypt_data(self, iv, data, tag): 
+
+        key = load_pem_public_key(self.client_public_key)
+        print(key)
+        key = key[:256]
+
+        shared_key = exchange.exchange(peer_public_key_2) #TODO
+        # falta gerar a shared key no diffie helmann e guardar a derived key no self.derived_shared_key xD
+        # depois a cada N chunks faz o diffie helman e usa essa guardada pelo diffie helman
+
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=info,
+            backend=backend
+        ).derive(shared_key)
+
+        if self.cipher == 'ChaCha20': # 256
+            algorithm = algorithms.ChaCha20(key, nonce)
+
+        elif self.cipher == 'AES': # 128, 192, 256
+            algorithm = algorithms.AES(key)
+
+        elif self.cipher == '3DES':# 64, 128, 192
+            algorithm = algorithm.TripleDES(key)
+
+        ## Check IV size..
+        ## ChaCha mode is None maybe
+        if self.ciphermode == 'CBC':
+            mode = modes.CBC(iv)
+        elif self.ciphermode == 'GCM':
+            mode = modes.GCM(iv, tag)
+        elif self.ciphermode == 'ECB':
+            mode = modes.ECB(iv, tag)
+
+        decryptor = Cipher(algorithm, mode, tag).decryptor()
+        data = decrytor.update(data)
+
+        unpadder = padding.PKCS7(algorithm.block_size).unpadder()
+        data = unpadder.update(data) + unpadder.finalize()
+
+        return data
+            
+
+    def encrypt(key, plaintext, associated_data):
+        
+        # Generate a random 96-bit IV.
+        iv = os.urandom(12)
+
+        # Construct an AES-GCM Cipher object with the given key and a
+        # randomly generated IV.
+        encryptor = Cipher(
+            algorithms.AES(key),
+            modes.GCM(iv),
+        ).encryptor()
+
+        # associated_data will be authenticated but not encrypted,
+        # it must also be passed in on decryption.
+        encryptor.authenticate_additional_data(associated_data)
+
+        # Encrypt the plaintext and get the associated ciphertext.
+        # GCM does not require padding.
+        ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+
+        return (iv, ciphertext, encryptor.tag)
+
+    def decrypt(key, associated_data, iv, ciphertext, tag):
+        # Construct a Cipher object, with the key, iv, and additionally the
+        # GCM tag used for authenticating the message.
+        decryptor = Cipher(
+            algorithms.AES(key),
+            modes.GCM(iv, tag),
+        ).decryptor()
+
+        # We put associated_data back in or the tag will fail to verify
+        # when we finalize the decryptor.
+        decryptor.authenticate_additional_data(associated_data)
+
+        # Decryption gets us the authenticated plaintext.
+        # If the tag does not match an InvalidTag exception will be raised.
+        return decryptor.update(ciphertext) + decryptor.finalize()
+
+iv, ciphertext, tag = encrypt(
+    key,
+    b"a secret message!",
+    b"authenticated but not encrypted payload"
+)
+
+print(decrypt(
+    key,
+    b"authenticated but not encrypted payload",
+    iv,
+    ciphertext,
+    tag
+))
+
+
+algorithms.TripleDES
+algorithms.AES
+algorithms.ChaCha20
+
 
 print("Server started")
 print("URL is: http://IP:8080")
@@ -233,34 +395,3 @@ print("URL is: http://IP:8080")
 s = server.Site(MediaServer())
 reactor.listenTCP(8080, s)
 reactor.run()
-
-'''
->>> # Generate some parameters. These can be reused.
->>> parameters = dh.generate_parameters(generator=2, key_size=2048)
->>> # Generate a private key for use in the exchange.
->>> private_key = parameters.generate_private_key()
->>> # In a real handshake the peer_public_key will be received from the
->>> # other party. For this example we'll generate another private key and
->>> # get a public key from that. Note that in a DH handshake both peers
->>> # must agree on a common set of parameters.
->>> peer_public_key = parameters.generate_private_key().public_key()
->>> shared_key = private_key.exchange(peer_public_key)
->>> # Perform key derivation.
->>> derived_key = HKDF(
-...     algorithm=hashes.SHA256(),
-...     length=32,
-...     salt=None,
-...     info=b'handshake data',
-... ).derive(shared_key)
->>> # For the next handshake we MUST generate another private key, but
->>> # we can reuse the parameters.
->>> private_key_2 = parameters.generate_private_key()
->>> peer_public_key_2 = parameters.generate_private_key().public_key()
->>> shared_key_2 = private_key_2.exchange(peer_public_key_2)
->>> derived_key_2 = HKDF(
-...     algorithm=hashes.SHA256(),
-...     length=32,
-...     salt=None,
-...     info=b'handshake data',
-... ).derive(shared_key_2)
-'''
