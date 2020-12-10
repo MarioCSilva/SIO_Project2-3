@@ -177,35 +177,55 @@ class MediaServer(resource.Resource):
             if request.path == b'/api/hello':
                 print(data)
                 ciphers = data['ciphers']
+                digests = data['digests']
+                ciphermodes = data['ciphermodes']
 
                 # TODO: change cipher order
                 if 'ChaCha20' in ciphers:
-                    cipher = 'ChaCha20'
+                    self.cipher = 'ChaCha20'
                 elif '3DES' in ciphers:
-                    cipher = '3DES'
+                    self.cipher = '3DES'
                 elif 'AES' in ciphers:
-                    cipher = 'AES'
+                    self.cipher = 'AES'
                 else:
                     # Ciphers not supported
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                     return json.dumps({'error': 'ciphers not supported'}, indent=4).encode('latin')
+                
+                if 'SHA-256' in digests:
+                    self.digest = 'SHA-256'
+                elif 'SHA-384' in digests:
+                    self.digest = 'SHA-384'
+                elif 'SHA-512' in digests:
+                    self.digest = 'SHA-512'
+                else:
+                    # Digest not supported
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'digests not supported'}, indent=4).encode('latin')
+                
+                if 'CBC' in ciphermodes:
+                    self.ciphermode = 'CBC'
+                elif 'GCM' in ciphermodes:
+                    self.ciphermode = 'GCM'
+                elif 'ECB' in ciphermodes:
+                    self.ciphermode = 'ECB'
+                else:
+                    # Cipher modes not supported
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'cipher modes not supported'}, indent=4).encode('latin')
 
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                parameters = dh.generate_parameters(generator=2, key_size=1024)
-
-                self.private_key = parameters.generate_private_key()
-                self.public_key = self.private_key.public_key()
-                pn = parameters.parameter_numbers()
-
-                print(self.public_key.__str__())
-
+                
+                p, g, salt = self.diffie_hellman(2, 1024)
+                
                 return json.dumps({
                         'method':'HELLO',
                         'cipher': cipher,
                         'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
                         'parameters': {
-                            'p': pn.p,
-                            'g': pn.g
+                            'p': p,
+                            'g': g,
+                            'salt': salt
                         }
                     }).encode("latin")
 
@@ -239,7 +259,34 @@ class MediaServer(resource.Resource):
     >>> mode = CBC(iv)
     '''
 
-    
+    def diffie_hellman(self, generator, key_size):
+        parameters = dh.generate_parameters(generator=generator, key_size=key_size)
+        self.private_key = parameters.generate_private_key()
+        self.public_key = self.private_key.public_key()
+        pn = parameters.parameter_numbers()
+        
+        if self.digest == 'SHA-256':
+            digest = hashes.SHA256()
+        elif self.digest == 'SHA-384':
+            digest = hashes.SHA384()
+        elif self.digest == 'SHA-512':
+            digest = hashes.SHA512()
+
+        print(self.public_key.__str__())
+        
+        key = load_pem_public_key(self.client_public_key)
+
+        shared_key = exchange.exchange(peer_public_key_2)
+        
+        hkdf = HKDF(
+            algorithm=digest,
+            length=32,
+            salt=salt,
+            info=b'handshake info',
+        ).derive(shared_key)
+        
+        return pn.p, pn.g, salt
+            
     # Encrypt data
     def encrypt_data(self, data): 
         ## Key maybe ain't this...
@@ -288,21 +335,13 @@ class MediaServer(resource.Resource):
     # Decrypt data
     def decrypt_data(self, iv, data, tag): 
 
-        key = load_pem_public_key(self.client_public_key)
         print(key)
         key = key[:256]
 
-        shared_key = exchange.exchange(peer_public_key_2) #TODO
+        #TODO
         # falta gerar a shared key no diffie helmann e guardar a derived key no self.derived_shared_key xD
         # depois a cada N chunks faz o diffie helman e usa essa guardada pelo diffie helman
 
-        hkdf = HKDF(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            info=info,
-            backend=backend
-        ).derive(shared_key)
 
         if self.cipher == 'ChaCha20': # 256
             algorithm = algorithms.ChaCha20(key, nonce)
