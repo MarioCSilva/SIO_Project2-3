@@ -331,18 +331,16 @@ class MediaServer(resource.Resource):
         padder = padding.PKCS7(block_size).padder()
         padded_data = padder.update(data)
         return padded_data + padder.finalize()
+    
+    
+    def unpadder(self, block_size, data):
+        unpadder = padding.PKCS7(block_size).unpadder()
+        return unpadder.update(data) + unpadder.finalize()
 
 
     # Decrypt data
     def decrypt_data(self, iv, data, tag): 
-
-        print(key)
-        key = key[:256]
-
-        #TODO
-        # falta gerar a shared key no diffie helmann e guardar a derived key no self.derived_shared_key xD
-        # depois a cada N chunks faz o diffie helman e usa essa guardada pelo diffie helman
-
+        key = self.derived_key
 
         if self.cipher == 'ChaCha20': # 256
             algorithm = algorithms.ChaCha20(key, nonce)
@@ -365,69 +363,9 @@ class MediaServer(resource.Resource):
         decryptor = Cipher(algorithm, mode, tag).decryptor()
         data = decrytor.update(data)
 
-        unpadder = padding.PKCS7(algorithm.block_size).unpadder()
-        data = unpadder.update(data) + unpadder.finalize()
+        data = self.unpadder(algorithm.block_size, data)
 
         return data
-            
-
-    def encrypt(key, plaintext, associated_data):
-        
-        # Generate a random 96-bit IV.
-        iv = os.urandom(12)
-
-        # Construct an AES-GCM Cipher object with the given key and a
-        # randomly generated IV.
-        encryptor = Cipher(
-            algorithms.AES(key),
-            modes.GCM(iv),
-        ).encryptor()
-
-        # associated_data will be authenticated but not encrypted,
-        # it must also be passed in on decryption.
-        encryptor.authenticate_additional_data(associated_data)
-
-        # Encrypt the plaintext and get the associated ciphertext.
-        # GCM does not require padding.
-        ciphertext = encryptor.update(plaintext) + encryptor.finalize()
-
-        return (iv, ciphertext, encryptor.tag)
-
-    def decrypt(key, associated_data, iv, ciphertext, tag):
-        # Construct a Cipher object, with the key, iv, and additionally the
-        # GCM tag used for authenticating the message.
-        decryptor = Cipher(
-            algorithms.AES(key),
-            modes.GCM(iv, tag),
-        ).decryptor()
-
-        # We put associated_data back in or the tag will fail to verify
-        # when we finalize the decryptor.
-        decryptor.authenticate_additional_data(associated_data)
-
-        # Decryption gets us the authenticated plaintext.
-        # If the tag does not match an InvalidTag exception will be raised.
-        return decryptor.update(ciphertext) + decryptor.finalize()
-
-iv, ciphertext, tag = encrypt(
-    key,
-    b"a secret message!",
-    b"authenticated but not encrypted payload"
-)
-
-print(decrypt(
-    key,
-    b"authenticated but not encrypted payload",
-    iv,
-    ciphertext,
-    tag
-))
-
-
-algorithms.TripleDES
-algorithms.AES
-algorithms.ChaCha20
-
 
 print("Server started")
 print("URL is: http://IP:8080")

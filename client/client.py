@@ -48,15 +48,18 @@ class Client:
                 exit(1)
                 
             self.cipher = response['cipher']
+            self.ciphermode = response['ciphermode']
+            self.digest = response['digest']
             print(response)
 
             self.server_public_key = response['public_key']
 
-            p, g = response['parameters']['p'], response['parameters']['g']
-            pn = dh.DHParameterNumbers(p, g).parameters()
-
-            self.private_key = pn.generate_private_key()
-            self.public_key = self.private_key.public_key()
+            p, g, salt, key_size =  response['parameters']['p'],
+                                    response['parameters']['g'],
+                                    response['parameters']['salt'],
+                                    response['parameters']['key_size']
+                                   
+            self.diffie_hellman(p, g, salt, key_size)
 
             if self.send_message( {'method': 'KEY_EXCHANGE', 'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()} ) is None:
                 print(response)
@@ -76,10 +79,116 @@ class Client:
         else:
             return
     
+    
     def negotiate(self):
         """ Send supported client suited ciphers. """
         self.send_message( { 'method': 'HELLO', 'ciphers': self.ciphers, 'digests': self.digests, 'ciphermode': self.ciphermode } )
 
+    
+    def diffie_hellman(self, p, g, salt, key_size):
+        pn = dh.DHParameterNumbers(p, g).parameters()
+
+        self.private_key = pn.generate_private_key()
+        self.public_key = self.private_key.public_key()
+        
+        if self.digest == 'SHA-256':
+            digest = hashes.SHA256()
+        elif self.digest == 'SHA-384':
+            digest = hashes.SHA384()
+        elif self.digest == 'SHA-512':
+            digest = hashes.SHA512()
+
+        server_public_key = load_pem_public_key(self.server_public_key.encode())
+
+        shared_key = self.private_key.exchange(server_public_key)
+
+        # Check length here and salt
+        self.derived_key = HKDF(
+            algorithm=digest,
+            length=32,
+            salt=None,
+            info=b'handshake info',
+        ).derive(shared_key)
+        
+            
+    # Encrypt data
+    def encrypt_data(self, data): 
+        ## Key maybe ain't this...
+        ## Check Key size..
+        key = self.derived_key
+
+        nonce = os.urandom(16)
+        
+        if self.cipher == 'ChaCha20':
+            algorithm = algorithms.ChaCha20(key, nonce)
+        elif self.cipher == 'AES':
+            algorithm = algorithms.AES(key)
+        elif self.cipher == '3DES':
+            algorithm = algorithm.TripleDES(key)
+
+        ## Check IV size..
+        ## ChaCha mode is None maybe
+        iv = os.urandom(16)
+
+        if self.ciphermode == 'CBC':
+            mode = modes.CBC(iv)
+            #Padding is required when using this mode.
+            data = self.padding(algorithm.block_size, data)
+
+        elif self.ciphermode == 'GCM':
+            mode = modes.GCM(iv)
+            # This mode does not require padding.
+
+        elif self.ciphermode == 'ECB':
+            mode = modes.ECB(iv)
+            #Padding is required when using this mode.
+            data = self.padding(algorithm.block_size, data)
+        
+        encryptor = Cipher(algorithm, mode).encryptor()
+        ct = encryptor.update(data) + encryptor.finalize()
+
+        return iv, ct, encryptor.tag
+
+
+    def padding(self, block_size, data):
+        padder = padding.PKCS7(block_size).padder()
+        padded_data = padder.update(data)
+        return padded_data + padder.finalize()
+    
+    
+    def unpadder(self, block_size, data):
+        unpadder = padding.PKCS7(block_size).unpadder()
+        return unpadder.update(data) + unpadder.finalize()
+
+
+    # Decrypt data
+    def decrypt_data(self, iv, data, tag): 
+        key = self.derived_key
+
+        if self.cipher == 'ChaCha20': # 256
+            algorithm = algorithms.ChaCha20(key, nonce)
+
+        elif self.cipher == 'AES': # 128, 192, 256
+            algorithm = algorithms.AES(key)
+
+        elif self.cipher == '3DES':# 64, 128, 192
+            algorithm = algorithm.TripleDES(key)
+
+        ## Check IV size..
+        ## ChaCha mode is None maybe
+        if self.ciphermode == 'CBC':
+            mode = modes.CBC(iv)
+        elif self.ciphermode == 'GCM':
+            mode = modes.GCM(iv, tag)
+        elif self.ciphermode == 'ECB':
+            mode = modes.ECB(iv, tag)
+
+        decryptor = Cipher(algorithm, mode, tag).decryptor()
+        data = decrytor.update(data)
+
+        data = self.unpadder(algorithm.block_size, data)
+
+        return data
 
 def main():
     print("|--------------------------------------|")
