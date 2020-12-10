@@ -41,6 +41,7 @@ class Client:
 
         if message['method'] == 'HELLO':
             req = requests.post( f'{SERVER_URL}/api/hello', data=data, headers={ b"content-type": b"application/json" } )
+            
             response = req.json()
 
             if response['method'] != 'HELLO':
@@ -54,9 +55,9 @@ class Client:
 
             self.server_public_key = response['public_key']
 
-            p, g, salt, key_size =  response['parameters']['p'],
-                                    response['parameters']['g'],
-                                    response['parameters']['salt'],
+            p, g, salt, key_size =  response['parameters']['p'],\
+                                    response['parameters']['g'],\
+                                    response['parameters']['salt'],\
                                     response['parameters']['key_size']
                                    
             self.diffie_hellman(p, g, salt, key_size)
@@ -82,7 +83,7 @@ class Client:
     
     def negotiate(self):
         """ Send supported client suited ciphers. """
-        self.send_message( { 'method': 'HELLO', 'ciphers': self.ciphers, 'digests': self.digests, 'ciphermode': self.ciphermode } )
+        self.send_message( { 'method': 'HELLO', 'ciphers': self.ciphers, 'digests': self.digests, 'ciphermodes': self.ciphermodes } )
 
     
     def diffie_hellman(self, p, g, salt, key_size):
