@@ -273,15 +273,16 @@ class MediaServer(resource.Resource):
             digest = hashes.SHA512()
 
         print(self.public_key.__str__())
-        
-        key = load_pem_public_key(self.client_public_key)
 
-        shared_key = exchange.exchange(peer_public_key_2)
-        
-        hkdf = HKDF(
+        client_public_key = load_pem_public_key(self.client_public_key.encode())
+
+        shared_key = self.private_key.exchange(client_public_key)
+
+        # Check length here and salt
+        self.derived_key = HKDF(
             algorithm=digest,
             length=32,
-            salt=salt,
+            salt=None,
             info=b'handshake info',
         ).derive(shared_key)
         
@@ -291,7 +292,7 @@ class MediaServer(resource.Resource):
     def encrypt_data(self, data): 
         ## Key maybe ain't this...
         ## Check Key size..
-        key = self.public_key
+        key = self.derived_key
 
         nonce = os.urandom(16)
         
@@ -308,10 +309,8 @@ class MediaServer(resource.Resource):
 
         if self.ciphermode == 'CBC':
             mode = modes.CBC(iv)
-            #Padding is required when using this mode.      
-            padder = padding.PKCS7(algorithm.block_size).padder()
-            padded_data = padder.update(data)
-            data = padded_data + padder.finalize()
+            #Padding is required when using this mode.
+            data = self.padding(algorithm.block_size, data)
 
         elif self.ciphermode == 'GCM':
             mode = modes.GCM(iv)
@@ -320,16 +319,18 @@ class MediaServer(resource.Resource):
         elif self.ciphermode == 'ECB':
             mode = modes.ECB(iv)
             #Padding is required when using this mode.
-            padder = padding.PKCS7(algorithm.block_size).padder()
-            padded_data = padder.update(data)
-            data = padded_data + padder.finalize()
-
+            data = self.padding(algorithm.block_size, data)
         
         encryptor = Cipher(algorithm, mode).encryptor()
         ct = encryptor.update(data) + encryptor.finalize()
 
         return iv, ct, encryptor.tag
 
+
+    def padding(self, block_size, data):
+        padder = padding.PKCS7(block_size).padder()
+        padded_data = padder.update(data)
+        return padded_data + padder.finalize()
 
 
     # Decrypt data
