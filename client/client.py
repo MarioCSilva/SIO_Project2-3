@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, ParameterForm
 from cryptography.hazmat.backends import default_backend  
 from cryptography.hazmat.primitives.asymmetric import rsa  
 from cryptography.hazmat.primitives import serialization  
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dh
@@ -20,6 +21,9 @@ logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
 logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)
+logger.setLevel(logging.ERROR)
+logger.setLevel(logging.DEBUG)
 
 SERVER_URL = 'http://127.0.0.1:8080'
 
@@ -41,7 +45,7 @@ class Client:
 
         if message['method'] == 'HELLO':
             req = requests.post( f'{SERVER_URL}/api/hello', data=data, headers={ b"content-type": b"application/json" } )
-            
+
             response = req.json()
 
             if response['method'] != 'HELLO':
@@ -148,7 +152,7 @@ class Client:
         encryptor = Cipher(algorithm, mode).encryptor()
         ct = encryptor.update(data) + encryptor.finalize()
 
-        return iv, ct, encryptor.tag
+        return iv, ct
 
 
     def padding(self, block_size, data):
@@ -163,11 +167,12 @@ class Client:
 
 
     # Decrypt data
-    def decrypt_data(self, iv, data, tag): 
+    def decrypt_data(self, iv, data, nonce=None):
         key = self.derived_key
 
         if self.cipher == 'ChaCha20': # 256
             algorithm = algorithms.ChaCha20(key, nonce)
+            mode = None
 
         elif self.cipher == 'AES': # 128, 192, 256
             algorithm = algorithms.AES(key)
@@ -180,14 +185,15 @@ class Client:
         if self.ciphermode == 'CBC':
             mode = modes.CBC(iv)
         elif self.ciphermode == 'GCM':
-            mode = modes.GCM(iv, tag)
+            mode = modes.GCM(iv)
         elif self.ciphermode == 'ECB':
-            mode = modes.ECB(iv, tag)
+            mode = modes.ECB(iv)
 
-        decryptor = Cipher(algorithm, mode, tag).decryptor()
-        data = decrytor.update(data)
+        decryptor = Cipher(algorithm, mode).decryptor()
+        data = decryptor.update(data)
 
-        data = self.unpadder(algorithm.block_size, data)
+        if self.ciphermode in {'CBC', 'ECB'}:
+            data = self.unpadder(algorithm.block_size, data)
 
         return data
 
@@ -263,10 +269,18 @@ def main():
     # Get data from server and send it to the ffplay stdin through a pipe
     for chunk in range(media_item['chunks'] + 1):
         req = requests.get(f'{SERVER_URL}/api/download?id={media_item["id"]}&chunk={chunk}')
-        chunk = req.json()
-        # TODO: Process chunk
+        response = req.json()
+        logger.debug(response)
 
-        data = binascii.a2b_base64(chunk['data'].encode('latin'))
+        iv = binascii.a2b_base64(response['iv'].encode('latin'))
+        data = binascii.a2b_base64(response['data'].encode('latin'))
+        nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
+        media_id = response['media_id']
+        chunk = response['chunk']
+        
+        data = client.decrypt_data(iv, data, nonce)
+        logger.debug(data)
+
         try:
             proc.stdin.write(data)
         except:

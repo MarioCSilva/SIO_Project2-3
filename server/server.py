@@ -125,10 +125,15 @@ class MediaServer(resource.Resource):
             data = f.read(CHUNK_SIZE)
 
             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+
+            data, iv, nonce = self.encrypt_data(data)
+
             return json.dumps(
                     {
                         'media_id': media_id, 
                         'chunk': chunk_id, 
+                        'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+                        'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
                         'data': binascii.b2a_base64(data).decode('latin').strip()
                     },indent=4
                 ).encode('latin')
@@ -203,7 +208,9 @@ class MediaServer(resource.Resource):
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                     return json.dumps({'error': 'digests not supported'}, indent=4).encode('latin')
                 
-                if 'CBC' in ciphermodes:
+                if self.cipher == 'ChaCha20':
+                    self.ciphermode = None
+                elif 'CBC' in ciphermodes:
                     self.ciphermode = 'CBC'
                 elif 'GCM' in ciphermodes:
                     self.ciphermode = 'GCM'
@@ -220,12 +227,15 @@ class MediaServer(resource.Resource):
                 
                 return json.dumps({
                         'method':'HELLO',
-                        'cipher': cipher,
+                        'cipher': self.cipher,
+                        'digest': self.digest,
+                        'ciphermode': self.ciphermode,
                         'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
                         'parameters': {
                             'p': p,
                             'g': g,
-                            'salt': salt
+                            'salt': salt,
+                            'key_size': 1024,
                         }
                     }).encode("latin")
 
@@ -235,13 +245,33 @@ class MediaServer(resource.Resource):
                 # load_pem_public_key(data['public_key'].encode())
                 self.client_public_key = data['public_key']
                 print("cli_pub_key",self.client_public_key)
+                
+                client_public_key = load_pem_public_key(self.client_public_key.encode())
+
+                shared_key = self.private_key.exchange(client_public_key)
+
+                if self.digest == 'SHA-256':
+                    digest = hashes.SHA256()
+                elif self.digest == 'SHA-384':
+                    digest = hashes.SHA384()
+                elif self.digest == 'SHA-512':
+                    digest = hashes.SHA512()
+
+                # Check length here and salt
+                self.derived_key = HKDF(
+                    algorithm=digest,
+                    length=32,
+                    salt=None,
+                    info=b'handshake info',
+                ).derive(shared_key)
+
                 print("sv_private_key",self.private_key)
                 print("sv_public_key",self.public_key)
 
                 return json.dumps({ 'method': 'ACK' }).encode("latin")
             else:
                 request.responseHeaders.addRawHeader(b"content-type", b'text/plain')
-                return b'Methods: /api/cipher'
+                return b'Methods: /api/hello /api/key_exchange'
         except Exception as e:
             logger.exception(e)
             request.setResponseCode(500)
@@ -264,27 +294,10 @@ class MediaServer(resource.Resource):
         self.private_key = parameters.generate_private_key()
         self.public_key = self.private_key.public_key()
         pn = parameters.parameter_numbers()
-        
-        if self.digest == 'SHA-256':
-            digest = hashes.SHA256()
-        elif self.digest == 'SHA-384':
-            digest = hashes.SHA384()
-        elif self.digest == 'SHA-512':
-            digest = hashes.SHA512()
 
         print(self.public_key.__str__())
 
-        client_public_key = load_pem_public_key(self.client_public_key.encode())
-
-        shared_key = self.private_key.exchange(client_public_key)
-
-        # Check length here and salt
-        self.derived_key = HKDF(
-            algorithm=digest,
-            length=32,
-            salt=None,
-            info=b'handshake info',
-        ).derive(shared_key)
+        salt = None
         
         return pn.p, pn.g, salt
             
@@ -294,37 +307,38 @@ class MediaServer(resource.Resource):
         ## Check Key size..
         key = self.derived_key
 
-        nonce = os.urandom(16)
-        
+        nonce = None
+
         if self.cipher == 'ChaCha20':
+            nonce = os.urandom(16)
             algorithm = algorithms.ChaCha20(key, nonce)
         elif self.cipher == 'AES':
             algorithm = algorithms.AES(key)
         elif self.cipher == '3DES':
-            algorithm = algorithm.TripleDES(key)
+            algorithm = algorithms.TripleDES(key)
 
         ## Check IV size..
-        ## ChaCha mode is None maybe
         iv = os.urandom(16)
 
-        if self.ciphermode == 'CBC':
+        if self.cipher == 'ChaCha20':
+            mode = None
+        elif self.ciphermode == 'CBC':
             mode = modes.CBC(iv)
             #Padding is required when using this mode.
             data = self.padding(algorithm.block_size, data)
-
         elif self.ciphermode == 'GCM':
             mode = modes.GCM(iv)
             # This mode does not require padding.
-
         elif self.ciphermode == 'ECB':
             mode = modes.ECB(iv)
             #Padding is required when using this mode.
             data = self.padding(algorithm.block_size, data)
         
         encryptor = Cipher(algorithm, mode).encryptor()
-        ct = encryptor.update(data) + encryptor.finalize()
-
-        return iv, ct, encryptor.tag
+        encrypted_data = encryptor.update(data) + encryptor.finalize()
+        logger.debug(encrypted_data)
+        
+        return encrypted_data, iv, nonce
 
 
     def padding(self, block_size, data):
@@ -339,7 +353,7 @@ class MediaServer(resource.Resource):
 
 
     # Decrypt data
-    def decrypt_data(self, iv, data, tag): 
+    def decrypt_data(self, iv, data): 
         key = self.derived_key
 
         if self.cipher == 'ChaCha20': # 256
@@ -356,11 +370,11 @@ class MediaServer(resource.Resource):
         if self.ciphermode == 'CBC':
             mode = modes.CBC(iv)
         elif self.ciphermode == 'GCM':
-            mode = modes.GCM(iv, tag)
+            mode = modes.GCM(iv)
         elif self.ciphermode == 'ECB':
-            mode = modes.ECB(iv, tag)
+            mode = modes.ECB(iv)
 
-        decryptor = Cipher(algorithm, mode, tag).decryptor()
+        decryptor = Cipher(algorithm, mode).decryptor()
         data = decrytor.update(data)
 
         data = self.unpadder(algorithm.block_size, data)
