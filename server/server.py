@@ -126,12 +126,17 @@ class MediaServer(resource.Resource):
 
             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
 
-            data, iv, nonce = self.encrypt_data(data)
+            derived_key, hmac_key, salt = self.gen_derived_key(0, 0)
+
+            data, iv, nonce = self.encrypt_data(derived_key, data)
+
+            data = self.gen_MAC(hmac_key, data)
 
             return json.dumps(
                     {
-                        'media_id': media_id, 
-                        'chunk': chunk_id, 
+                        'media_id': media_id,
+                        'chunk': chunk_id,
+                        'salt': binascii.b2a_base64(salt).decode('latin').strip(),
                         'iv': binascii.b2a_base64(iv).decode('latin').strip(),
                         'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
                         'data': binascii.b2a_base64(data).decode('latin').strip()
@@ -170,6 +175,7 @@ class MediaServer(resource.Resource):
             request.setResponseCode(500)
             request.responseHeaders.addRawHeader(b"content-type", b"text/plain")
             return b''
+        
     
     # Handle a POST request
     def render_POST(self, request):
@@ -248,25 +254,10 @@ class MediaServer(resource.Resource):
                 
                 client_public_key = load_pem_public_key(self.client_public_key.encode())
 
-                shared_key = self.private_key.exchange(client_public_key)
+                self.shared_key = self.private_key.exchange(client_public_key)
 
-                if self.digest == 'SHA-256':
-                    digest = hashes.SHA256()
-                elif self.digest == 'SHA-384':
-                    digest = hashes.SHA384()
-                elif self.digest == 'SHA-512':
-                    digest = hashes.SHA512()
-
-                # Check length here and salt
-                self.derived_key = HKDF(
-                    algorithm=digest,
-                    length=32,
-                    salt=None,
-                    info=b'handshake info',
-                ).derive(shared_key)
-
-                print("sv_private_key",self.private_key)
-                print("sv_public_key",self.public_key)
+                print("sv_private_key", self.private_key)
+                print("sv_public_key", self.public_key)
 
                 return json.dumps({ 'method': 'ACK' }).encode("latin")
             else:
@@ -277,6 +268,72 @@ class MediaServer(resource.Resource):
             request.setResponseCode(500)
             request.responseHeaders.addRawHeader(b"content-type", b"text/plain")
             return b''
+        
+        
+    def gen_MAC(hmac_key, data):
+        if self.digest == 'SHA-256':
+            digest = hashes.SHA256()
+        elif self.digest == 'SHA-384':
+            digest = hashes.SHA384()
+        elif self.digest == 'SHA-512':
+            digest = hashes.SHA512()
+
+        mac_digest = hmac.HMAC(hmac_key, digest)
+        mac_digest.update(data)
+
+        return f'{data}{mac_digest.finalize()}'
+    
+    def verify_MAC(hmac_key, data):
+        if self.digest == 'SHA-256':
+            digest = hashes.SHA256()
+        elif self.digest == 'SHA-384':
+            digest = hashes.SHA384()
+        elif self.digest == 'SHA-512':
+            digest = hashes.SHA512()
+        else:
+            logger.debug("Must negotiate first.")
+            return False
+
+        mac_digest = hmac.HMAC(hmac_key, digest)
+        mac_digest.update(data[:digest.digest_size])
+        logger.debug("sera? vai dar merda?")
+
+        try:
+            mac_digest.verify(data[digest.digest_size:])
+            return True
+        except:
+            logger.debug(" e nao e que deu merda!!!!")
+            return False
+    
+    def gen_derived_key(self, media_id, chunk_id):
+        if self.digest == 'SHA-256':
+            digest = hashes.SHA256()
+        elif self.digest == 'SHA-384':
+            digest = hashes.SHA384()
+        elif self.digest == 'SHA-512':
+            digest = hashes.SHA512()
+
+        salt_init = os.urandom(128)
+
+        result = bytearray()
+        chunk_id_b = bytes(chunk_id)
+        media_id_b = bytes(media_id)
+        
+        for b1, b2, b3 in zip(salt_init, [0]*(len(salt_init)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt_init)-len(media_id_b)) + list(media_id_b)):
+            result.append(b1 ^ b2 ^ b3)
+        
+        # Check length here and salt
+        derived_key = HKDF(
+            algorithm=digest,
+            length=32,
+            salt=bytes(result),
+            info=b'handshake info',
+        ).derive(self.shared_key)
+        
+        hmac_key = derived_key[len(derived_key)//2:]
+        derived_key = derived_key[:len(derived_key)//2]
+
+        return derived_key, hmac_key, salt_init
 
     '''
     ChaCha20 Decrypt
@@ -302,10 +359,10 @@ class MediaServer(resource.Resource):
         return pn.p, pn.g, salt
             
     # Encrypt data
-    def encrypt_data(self, data): 
+    def encrypt_data(self, derived_key, data): 
         ## Key maybe ain't this...
         ## Check Key size..
-        key = self.derived_key
+        key = derived_key
 
         nonce = None
 
@@ -353,8 +410,8 @@ class MediaServer(resource.Resource):
 
 
     # Decrypt data
-    def decrypt_data(self, iv, data): 
-        key = self.derived_key
+    def decrypt_data(self, derived_key, iv, data): 
+        key = derived_key
 
         if self.cipher == 'ChaCha20': # 256
             algorithm = algorithms.ChaCha20(key, nonce)

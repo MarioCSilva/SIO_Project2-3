@@ -105,22 +105,14 @@ class Client:
 
         server_public_key = load_pem_public_key(self.server_public_key.encode())
 
-        shared_key = self.private_key.exchange(server_public_key)
-
-        # Check length here and salt
-        self.derived_key = HKDF(
-            algorithm=digest,
-            length=32,
-            salt=None,
-            info=b'handshake info',
-        ).derive(shared_key)
+        self.shared_key = self.private_key.exchange(server_public_key)
         
             
     # Encrypt data
-    def encrypt_data(self, data): 
+    def encrypt_data(self, derived_key, data): 
         ## Key maybe ain't this...
         ## Check Key size..
-        key = self.derived_key
+        key = derived_key
 
         nonce = os.urandom(16)
         
@@ -167,8 +159,8 @@ class Client:
 
 
     # Decrypt data
-    def decrypt_data(self, iv, data, nonce=None):
-        key = self.derived_key
+    def decrypt_data(self, derived_key, iv, data, nonce=None):
+        key = derived_key
 
         if self.cipher == 'ChaCha20': # 256
             algorithm = algorithms.ChaCha20(key, nonce)
@@ -196,6 +188,58 @@ class Client:
             data = self.unpadder(algorithm.block_size, data)
 
         return data
+
+    def verify_MAC(hmac_key, data):
+        if self.digest == 'SHA-256':
+            digest = hashes.SHA256()
+        elif self.digest == 'SHA-384':
+            digest = hashes.SHA384()
+        elif self.digest == 'SHA-512':
+            digest = hashes.SHA512()
+        else:
+            logger.debug("Must negotiate first.")
+            return False
+
+        mac_digest = hmac.HMAC(hmac_key, digest)
+        mac_digest.update(data[:digest.digest_size])
+        logger.debug("sera? vai dar merda?")
+
+        try:
+            mac_digest.verify(data[digest.digest_size:])
+            return True
+        except:
+            logger.debug(" e nao e que deu merda!!!!")
+            return False
+    
+    def gen_derived_key(self, media_id, chunk_id):
+        if self.digest == 'SHA-256':
+            digest = hashes.SHA256()
+        elif self.digest == 'SHA-384':
+            digest = hashes.SHA384()
+        elif self.digest == 'SHA-512':
+            digest = hashes.SHA512()
+
+        salt_init = os.urandom(128)
+
+        result = bytearray()
+        chunk_id_b = bytes(chunk_id)
+        media_id_b = bytes(media_id)
+        
+        for b1, b2, b3 in zip(salt_init, [0]*(len(salt_init)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt_init)-len(media_id_b)) + list(media_id_b)):
+            result.append(b1 ^ b2 ^ b3)
+        
+        # Check length here and salt
+        derived_key = HKDF(
+            algorithm=digest,
+            length=32,
+            salt=bytes(result),
+            info=b'handshake info',
+        ).derive(self.shared_key)
+        
+        hmac_key = derived_key[len(derived_key)//2:]
+        derived_key = derived_key[:len(derived_key)//2]
+
+        return derived_key, hmac_key, salt_init
 
 def main():
     print("|--------------------------------------|")
@@ -273,13 +317,23 @@ def main():
         logger.debug(response)
 
         iv = binascii.a2b_base64(response['iv'].encode('latin'))
+        salt = binascii.a2b_base64(response['salt'].encode('latin'))
         data = binascii.a2b_base64(response['data'].encode('latin'))
         nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
         media_id = response['media_id']
         chunk = response['chunk']
         
-        data = client.decrypt_data(iv, data, nonce)
-        logger.debug(data)
+        # Generate ephemeral key and hmac key
+        derived_key, hmac_key, salt_init = client.gen_derived_key(media_id, chunk_id)
+        
+        # Verify MAC
+        if client.verify_mac(hmac_key, data):
+            logger.debug("Integrity confirmed.")   
+        
+        # Decrypt Data
+        data = client.decrypt_data(derived_key, iv, data, nonce)
+        
+        # logger.debug(data)
 
         try:
             proc.stdin.write(data)
