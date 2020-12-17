@@ -7,7 +7,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.primitives import serialization  
+from cryptography.hazmat.primitives import hmac
 import logging
 import binascii
 import json
@@ -126,16 +126,19 @@ class MediaServer(resource.Resource):
 
             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
 
-            derived_key, hmac_key, salt = self.gen_derived_key(0, 0)
+            derived_key, hmac_key, salt = self.gen_derived_key(media_id.encode('latin'), chunk_id)
 
             data, iv, nonce = self.encrypt_data(derived_key, data)
 
             data = self.gen_MAC(hmac_key, data)
 
+            logger.debug(data)
+            logger.debug(binascii.b2a_base64(data))
+
             return json.dumps(
                     {
                         'media_id': media_id,
-                        'chunk': chunk_id,
+                        'chunk_id': chunk_id,
                         'salt': binascii.b2a_base64(salt).decode('latin').strip(),
                         'iv': binascii.b2a_base64(iv).decode('latin').strip(),
                         'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
@@ -270,7 +273,7 @@ class MediaServer(resource.Resource):
             return b''
         
         
-    def gen_MAC(hmac_key, data):
+    def gen_MAC(self, hmac_key, data):
         if self.digest == 'SHA-256':
             digest = hashes.SHA256()
         elif self.digest == 'SHA-384':
@@ -281,9 +284,10 @@ class MediaServer(resource.Resource):
         mac_digest = hmac.HMAC(hmac_key, digest)
         mac_digest.update(data)
 
-        return f'{data}{mac_digest.finalize()}'
-    
-    def verify_MAC(hmac_key, data):
+        return eval(f'{data}{mac_digest.finalize()}')
+
+
+    def verify_MAC(self, hmac_key, data):
         if self.digest == 'SHA-256':
             digest = hashes.SHA256()
         elif self.digest == 'SHA-384':
@@ -325,7 +329,7 @@ class MediaServer(resource.Resource):
         # Check length here and salt
         derived_key = HKDF(
             algorithm=digest,
-            length=32,
+            length=64,  # TODO: revise this value
             salt=bytes(result),
             info=b'handshake info',
         ).derive(self.shared_key)

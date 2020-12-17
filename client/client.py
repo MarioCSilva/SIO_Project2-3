@@ -10,7 +10,7 @@ import sys
 from cryptography.hazmat.primitives.serialization import Encoding, ParameterFormat, PublicFormat, load_pem_private_key, load_pem_public_key
 from cryptography.hazmat.backends import default_backend  
 from cryptography.hazmat.primitives.asymmetric import rsa  
-from cryptography.hazmat.primitives import serialization  
+from cryptography.hazmat.primitives import hmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from cryptography.hazmat.primitives import hashes
@@ -189,7 +189,22 @@ class Client:
 
         return data
 
-    def verify_MAC(hmac_key, data):
+
+    def gen_MAC(self, hmac_key, data):
+        if self.digest == 'SHA-256':
+            digest = hashes.SHA256()
+        elif self.digest == 'SHA-384':
+            digest = hashes.SHA384()
+        elif self.digest == 'SHA-512':
+            digest = hashes.SHA512()
+
+        mac_digest = hmac.HMAC(hmac_key, digest)
+        mac_digest.update(data)
+
+        return f'{data}{mac_digest.finalize()}'
+
+
+    def verify_MAC(self, hmac_key, data):
         if self.digest == 'SHA-256':
             digest = hashes.SHA256()
         elif self.digest == 'SHA-384':
@@ -231,7 +246,7 @@ class Client:
         # Check length here and salt
         derived_key = HKDF(
             algorithm=digest,
-            length=32,
+            length=64,  # TODO: revise this value
             salt=bytes(result),
             info=b'handshake info',
         ).derive(self.shared_key)
@@ -321,14 +336,15 @@ def main():
         data = binascii.a2b_base64(response['data'].encode('latin'))
         nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
         media_id = response['media_id']
-        chunk = response['chunk']
+        chunk_id = response['chunk_id']
         
         # Generate ephemeral key and hmac key
-        derived_key, hmac_key, salt_init = client.gen_derived_key(media_id, chunk_id)
+        derived_key, hmac_key, salt_init = client.gen_derived_key(media_id.encode('latin'), chunk_id)
         
         # Verify MAC
-        if client.verify_mac(hmac_key, data):
-            logger.debug("Integrity confirmed.")   
+        if not client.verify_MAC(hmac_key, data):
+            logger.debug("Integrity compromised.")
+            exit()  
         
         # Decrypt Data
         data = client.decrypt_data(derived_key, iv, data, nonce)
