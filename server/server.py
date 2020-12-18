@@ -122,18 +122,25 @@ class MediaServer(resource.Resource):
         # Open file, seek to correct position and return the chunk
         with open(os.path.join(CATALOG_BASE, media_item['file_name']), 'rb') as f:
             f.seek(offset)
-            data = f.read(CHUNK_SIZE)
+            good_data = f.read(CHUNK_SIZE)
 
             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
 
-            derived_key, hmac_key, salt = self.gen_derived_key(media_id.encode('latin'), chunk_id)
+            derived_key, hmac_key, salt = self.gen_derived_key(media_id.encode('latin'), str(chunk_id).encode('latin'))
 
-            data, iv, nonce = self.encrypt_data(derived_key, data)
+
+            data, iv, nonce = self.encrypt_data(derived_key, good_data)
 
             data = self.gen_MAC(hmac_key, data)
 
-            logger.debug(data)
-            logger.debug(binascii.b2a_base64(data))
+            # logger.debug(data)
+            # logger.debug(binascii.b2a_base64(data))
+            logger.debug("            id %s" % chunk_id)
+            logger.debug("   derived_key %s" % derived_key)
+            logger.debug("            iv %s" % iv)
+            logger.debug("         nonce %s" % nonce)
+            logger.debug("          data %s" % data)
+            logger.debug("decrypted_data %s" % good_data)
 
             return json.dumps(
                     {
@@ -142,7 +149,8 @@ class MediaServer(resource.Resource):
                         'salt': binascii.b2a_base64(salt).decode('latin').strip(),
                         'iv': binascii.b2a_base64(iv).decode('latin').strip(),
                         'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
-                        'data': binascii.b2a_base64(data).decode('latin').strip()
+                        'data': binascii.b2a_base64(data).decode('latin').strip(),
+                        'good_data': binascii.b2a_base64(good_data).decode('latin').strip(),
                     },indent=4
                 ).encode('latin')
 
@@ -197,10 +205,10 @@ class MediaServer(resource.Resource):
                 # TODO: change cipher order
                 if 'ChaCha20' in ciphers:
                     self.cipher = 'ChaCha20'
-                elif '3DES' in ciphers:
-                    self.cipher = '3DES'
                 elif 'AES' in ciphers:
                     self.cipher = 'AES'
+                elif '3DES' in ciphers:
+                    self.cipher = '3DES'
                 else:
                     # Ciphers not supported
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
@@ -283,8 +291,9 @@ class MediaServer(resource.Resource):
 
         mac_digest = hmac.HMAC(hmac_key, digest)
         mac_digest.update(data)
-
-        return eval(f'{data}{mac_digest.finalize()}')
+        x = mac_digest.finalize()
+        print('server mac', x)
+        return eval(f'{data}{x}')
 
 
     def verify_MAC(self, hmac_key, data):
@@ -309,7 +318,7 @@ class MediaServer(resource.Resource):
             logger.debug(" e nao e que deu merda!!!!")
             return False
     
-    def gen_derived_key(self, media_id, chunk_id):
+    def gen_derived_key(self, media_id, chunk_id, salt=None):
         if self.digest == 'SHA-256':
             digest = hashes.SHA256()
         elif self.digest == 'SHA-384':
@@ -317,14 +326,22 @@ class MediaServer(resource.Resource):
         elif self.digest == 'SHA-512':
             digest = hashes.SHA512()
 
-        salt_init = os.urandom(128)
+        if salt is None:
+            salt_init = os.urandom(128)
+        else:
+            salt_init = salt
 
         result = bytearray()
         chunk_id_b = bytes(chunk_id)
         media_id_b = bytes(media_id)
-        
+
         for b1, b2, b3 in zip(salt_init, [0]*(len(salt_init)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt_init)-len(media_id_b)) + list(media_id_b)):
             result.append(b1 ^ b2 ^ b3)
+
+        # logger.debug(salt_init)
+        # logger.debug(chunk_id_b)
+        # logger.debug(media_id_b)
+        # logger.debug(bytes(result))
         
         # Check length here and salt
         derived_key = HKDF(
@@ -336,7 +353,8 @@ class MediaServer(resource.Resource):
         
         hmac_key = derived_key[len(derived_key)//2:]
         derived_key = derived_key[:len(derived_key)//2]
-
+        # logger.debug('sv mac key ' + str(hmac_key))
+        # logger.debug('sv der key ' + str(derived_key))
         return derived_key, hmac_key, salt_init
 
     '''
@@ -397,7 +415,6 @@ class MediaServer(resource.Resource):
         
         encryptor = Cipher(algorithm, mode).encryptor()
         encrypted_data = encryptor.update(data) + encryptor.finalize()
-        logger.debug(encrypted_data)
         
         return encrypted_data, iv, nonce
 

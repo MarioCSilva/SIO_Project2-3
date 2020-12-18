@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import hmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -180,9 +181,9 @@ class Client:
             mode = modes.GCM(iv)
         elif self.ciphermode == 'ECB':
             mode = modes.ECB(iv)
-
+            
         decryptor = Cipher(algorithm, mode).decryptor()
-        data = decryptor.update(data)
+        data = decryptor.update(data) + decryptor.finalize()
 
         if self.ciphermode in {'CBC', 'ECB'}:
             data = self.unpadder(algorithm.block_size, data)
@@ -201,7 +202,7 @@ class Client:
         mac_digest = hmac.HMAC(hmac_key, digest)
         mac_digest.update(data)
 
-        return f'{data}{mac_digest.finalize()}'
+        return eval(f'{data}{mac_digest.finalize()}')
 
 
     def verify_MAC(self, hmac_key, data):
@@ -213,20 +214,23 @@ class Client:
             digest = hashes.SHA512()
         else:
             logger.debug("Must negotiate first.")
-            return False
+            return None
 
         mac_digest = hmac.HMAC(hmac_key, digest)
-        mac_digest.update(data[:digest.digest_size])
+        print('cli_mac', data[-digest.digest_size:])
+
+
+        mac_digest.update(data[:-digest.digest_size])
         logger.debug("sera? vai dar merda?")
 
         try:
-            mac_digest.verify(data[digest.digest_size:])
-            return True
+            mac_digest.verify(data[-digest.digest_size:])
+            return data[:-digest.digest_size]
         except:
             logger.debug(" e nao e que deu merda!!!!")
-            return False
+            return None
     
-    def gen_derived_key(self, media_id, chunk_id):
+    def gen_derived_key(self, media_id, chunk_id, salt=None):
         if self.digest == 'SHA-256':
             digest = hashes.SHA256()
         elif self.digest == 'SHA-384':
@@ -234,7 +238,10 @@ class Client:
         elif self.digest == 'SHA-512':
             digest = hashes.SHA512()
 
-        salt_init = os.urandom(128)
+        if salt is None:
+            salt_init = os.urandom(128)
+        else:
+            salt_init = salt
 
         result = bytearray()
         chunk_id_b = bytes(chunk_id)
@@ -242,6 +249,11 @@ class Client:
         
         for b1, b2, b3 in zip(salt_init, [0]*(len(salt_init)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt_init)-len(media_id_b)) + list(media_id_b)):
             result.append(b1 ^ b2 ^ b3)
+
+        # logger.debug(salt_init)
+        # logger.debug(chunk_id_b)
+        # logger.debug(media_id_b)
+        # logger.debug(bytes(result))
         
         # Check length here and salt
         derived_key = HKDF(
@@ -253,6 +265,8 @@ class Client:
         
         hmac_key = derived_key[len(derived_key)//2:]
         derived_key = derived_key[:len(derived_key)//2]
+        # logger.debug('cli mac key ' + str(hmac_key))
+        # logger.debug('cli der key ' + str(derived_key))
 
         return derived_key, hmac_key, salt_init
 
@@ -283,7 +297,6 @@ def main():
 
 
     # validate all messages with MAC (calculate hash negotiated from last step and prepend it in the end)
-
     
     
     req = requests.get(f'{SERVER_URL}/api/list')
@@ -334,23 +347,34 @@ def main():
         iv = binascii.a2b_base64(response['iv'].encode('latin'))
         salt = binascii.a2b_base64(response['salt'].encode('latin'))
         data = binascii.a2b_base64(response['data'].encode('latin'))
+        good_data = binascii.a2b_base64(response['good_data'].encode('latin'))
         nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
         media_id = response['media_id']
         chunk_id = response['chunk_id']
         
         # Generate ephemeral key and hmac key
-        derived_key, hmac_key, salt_init = client.gen_derived_key(media_id.encode('latin'), chunk_id)
+        derived_key, hmac_key, _ = client.gen_derived_key(media_id.encode('latin'), str(chunk_id).encode('latin'), salt)
         
+        data = client.verify_MAC(hmac_key, data)
+
         # Verify MAC
-        if not client.verify_MAC(hmac_key, data):
+        if not data:
             logger.debug("Integrity compromised.")
             exit()  
         
         # Decrypt Data
-        data = client.decrypt_data(derived_key, iv, data, nonce)
         
-        # logger.debug(data)
+        logger.debug("         id %s" % chunk_id)
+        logger.debug("derived_key %s" % derived_key)
+        logger.debug("         iv %s" % iv)
+        logger.debug("       data %s" % data)
+        logger.debug("      nonce %s" % nonce)
+        
+        data = client.decrypt_data(derived_key, iv, data, nonce)
 
+        logger.debug("decrypted_data %s" % data)
+        
+       
         try:
             proc.stdin.write(data)
         except:
