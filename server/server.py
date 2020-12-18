@@ -133,15 +133,6 @@ class MediaServer(resource.Resource):
 
             data = self.gen_MAC(hmac_key, data)
 
-            # logger.debug(data)
-            # logger.debug(binascii.b2a_base64(data))
-            logger.debug("            id %s" % chunk_id)
-            logger.debug("   derived_key %s" % derived_key)
-            logger.debug("            iv %s" % iv)
-            logger.debug("         nonce %s" % nonce)
-            logger.debug("          data %s" % data)
-            logger.debug("decrypted_data %s" % good_data)
-
             return json.dumps(
                     {
                         'media_id': media_id,
@@ -318,7 +309,7 @@ class MediaServer(resource.Resource):
             logger.debug(" e nao e que deu merda!!!!")
             return False
     
-    def gen_derived_key(self, media_id, chunk_id, salt=None):
+    def gen_derived_key(self, media_id=None, chunk_id=None, salt=None):
         if self.digest == 'SHA-256':
             digest = hashes.SHA256()
         elif self.digest == 'SHA-384':
@@ -331,30 +322,27 @@ class MediaServer(resource.Resource):
         else:
             salt_init = salt
 
-        result = bytearray()
-        chunk_id_b = bytes(chunk_id)
-        media_id_b = bytes(media_id)
+        if chunk_id is not None:
+            result = bytearray()
+            chunk_id_b = bytes(chunk_id)
+            media_id_b = bytes(media_id)
+            
+            for b1, b2, b3 in zip(salt_init, [0]*(len(salt_init)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt_init)-len(media_id_b)) + list(media_id_b)):
+                result.append(b1 ^ b2 ^ b3)
+                
+            salt_init = bytes(result)
 
-        for b1, b2, b3 in zip(salt_init, [0]*(len(salt_init)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt_init)-len(media_id_b)) + list(media_id_b)):
-            result.append(b1 ^ b2 ^ b3)
-
-        # logger.debug(salt_init)
-        # logger.debug(chunk_id_b)
-        # logger.debug(media_id_b)
-        # logger.debug(bytes(result))
-        
         # Check length here and salt
         derived_key = HKDF(
             algorithm=digest,
             length=64,  # TODO: revise this value
-            salt=bytes(result),
+            salt=salt_init,
             info=b'handshake info',
         ).derive(self.shared_key)
         
         hmac_key = derived_key[len(derived_key)//2:]
         derived_key = derived_key[:len(derived_key)//2]
-        # logger.debug('sv mac key ' + str(hmac_key))
-        # logger.debug('sv der key ' + str(derived_key))
+
         return derived_key, hmac_key, salt_init
 
     '''

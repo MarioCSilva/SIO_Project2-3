@@ -68,7 +68,28 @@ class Client:
             self.diffie_hellman(p, g, salt, key_size)
 
             if self.send_message( {'method': 'KEY_EXCHANGE', 'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()} ) is None:
-                print(response)
+                logger.debug('Invalid.')
+                exit(1)
+            
+            derived_key, hmac_key, salt = self.gen_derived_key()
+            
+            data = json.dumps({
+                'cipher': self.cipher,
+                'digest': self.digest,
+                'ciphermode': self.ciphermode
+            }).encode()
+            
+            iv, data, nonce = self.encrypt_data(derived_key, data)
+            data = self.gen_MAC(hmac_key, data)
+            
+            if self.send_message( {
+                    'method': 'CONFIRM',
+                    'data': binascii.b2a_base64(data).decode('latin').strip(),
+                    'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+                    'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+                    'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip()
+                } ) is None:
+                logger.debug('Invalid.')
                 exit(1)
 
             print('server_public_key', self.server_public_key)
@@ -80,14 +101,16 @@ class Client:
             response = req.json()
             if response['method'] == 'ACK':
                 return True
-        elif not self.srvr_publickey:
-            pass
+        elif messsage['method'] == 'CONFIRM':
+            req = requests.post( f'{SERVER_URL}/api/confirm', data=data, headers={ b"content-type": b"application/json" } )
+            response = req.json()
+            
         else:
             return
     
     
     def negotiate(self):
-        """ Send supported client suited ciphers. """
+        """Send supported client suited ciphers."""
         self.send_message( { 'method': 'HELLO', 'ciphers': self.ciphers, 'digests': self.digests, 'ciphermodes': self.ciphermodes } )
 
     
@@ -115,37 +138,37 @@ class Client:
         ## Check Key size..
         key = derived_key
 
-        nonce = os.urandom(16)
-        
+        nonce = None
+
         if self.cipher == 'ChaCha20':
+            nonce = os.urandom(16)
             algorithm = algorithms.ChaCha20(key, nonce)
         elif self.cipher == 'AES':
             algorithm = algorithms.AES(key)
         elif self.cipher == '3DES':
-            algorithm = algorithm.TripleDES(key)
+            algorithm = algorithms.TripleDES(key)
 
         ## Check IV size..
-        ## ChaCha mode is None maybe
         iv = os.urandom(16)
 
-        if self.ciphermode == 'CBC':
+        if self.cipher == 'ChaCha20':
+            mode = None
+        elif self.ciphermode == 'CBC':
             mode = modes.CBC(iv)
             #Padding is required when using this mode.
             data = self.padding(algorithm.block_size, data)
-
         elif self.ciphermode == 'GCM':
             mode = modes.GCM(iv)
             # This mode does not require padding.
-
         elif self.ciphermode == 'ECB':
             mode = modes.ECB(iv)
             #Padding is required when using this mode.
             data = self.padding(algorithm.block_size, data)
         
         encryptor = Cipher(algorithm, mode).encryptor()
-        ct = encryptor.update(data) + encryptor.finalize()
-
-        return iv, ct
+        encrypted_data = encryptor.update(data) + encryptor.finalize()
+        
+        return encrypted_data, iv, nonce
 
 
     def padding(self, block_size, data):
@@ -229,8 +252,9 @@ class Client:
         except:
             logger.debug(" e nao e que deu merda!!!!")
             return None
-    
-    def gen_derived_key(self, media_id, chunk_id, salt=None):
+
+
+    def gen_derived_key(self, media_id=None, chunk_id=None, salt=None):
         if self.digest == 'SHA-256':
             digest = hashes.SHA256()
         elif self.digest == 'SHA-384':
@@ -243,30 +267,26 @@ class Client:
         else:
             salt_init = salt
 
-        result = bytearray()
-        chunk_id_b = bytes(chunk_id)
-        media_id_b = bytes(media_id)
-        
-        for b1, b2, b3 in zip(salt_init, [0]*(len(salt_init)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt_init)-len(media_id_b)) + list(media_id_b)):
-            result.append(b1 ^ b2 ^ b3)
+        if chunk_id is not None:
+            result = bytearray()
+            chunk_id_b = bytes(chunk_id)
+            media_id_b = bytes(media_id)
+            
+            for b1, b2, b3 in zip(salt_init, [0]*(len(salt_init)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt_init)-len(media_id_b)) + list(media_id_b)):
+                result.append(b1 ^ b2 ^ b3)
+                
+            salt_init = bytes(result)
 
-        # logger.debug(salt_init)
-        # logger.debug(chunk_id_b)
-        # logger.debug(media_id_b)
-        # logger.debug(bytes(result))
-        
         # Check length here and salt
         derived_key = HKDF(
             algorithm=digest,
             length=64,  # TODO: revise this value
-            salt=bytes(result),
+            salt=salt_init,
             info=b'handshake info',
         ).derive(self.shared_key)
         
         hmac_key = derived_key[len(derived_key)//2:]
         derived_key = derived_key[:len(derived_key)//2]
-        # logger.debug('cli mac key ' + str(hmac_key))
-        # logger.debug('cli der key ' + str(derived_key))
 
         return derived_key, hmac_key, salt_init
 
@@ -363,18 +383,8 @@ def main():
             exit()  
         
         # Decrypt Data
-        
-        logger.debug("         id %s" % chunk_id)
-        logger.debug("derived_key %s" % derived_key)
-        logger.debug("         iv %s" % iv)
-        logger.debug("       data %s" % data)
-        logger.debug("      nonce %s" % nonce)
-        
         data = client.decrypt_data(derived_key, iv, data, nonce)
 
-        logger.debug("decrypted_data %s" % data)
-        
-       
         try:
             proc.stdin.write(data)
         except:
