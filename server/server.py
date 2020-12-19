@@ -38,12 +38,36 @@ CATALOG = { '898a08080d1840793122b7e118b27a95d117ebce':
 CATALOG_BASE = 'catalog'
 CHUNK_SIZE = 1024 * 4
 
+PUB_KEY = 0
+PRI_KEY = 1
+
+SHARED_KEY = 1
+CIPHER = 2
+DIGEST = 3
+MODE = 4
+
+
+# TODO:
+# server_sessions
+# confirm
+# sequential steps verification
+# encrypt catalogo
+# encrypt all data or send parameters raw
+# resto do projeto
+
+
 class MediaServer(resource.Resource):
     isLeaf = True
+    cur_session_id = 0
+
     def __init__(self):
         self.ciphers=[]
         self.digests=[]
         self.ciphermodes=[]
+
+        self.sessions = {}
+
+                
         # self.ciphers = ['AES','3DES','ChaCha20']
         # self.digests = ['SHA-256','SHA-384','SHA-512']
         # self.ciphermodes = ['CBC','GCM','ECB']
@@ -231,18 +255,18 @@ class MediaServer(resource.Resource):
 
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                 
-                p, g, salt = self.diffie_hellman(2, 1024)
+                p, g, session_id = self.diffie_hellman(2, 1024)
                 
                 return json.dumps({
-                        'method':'HELLO',
+                        'method': 'HELLO',
+                        'session_id': session_id,
                         'cipher': self.cipher,
                         'digest': self.digest,
                         'ciphermode': self.ciphermode,
-                        'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
+                        'public_key': self.session_server[session_id][0].public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
                         'parameters': {
                             'p': p,
                             'g': g,
-                            'salt': salt,
                             'key_size': 1024,
                         }
                     }).encode("latin")
@@ -251,19 +275,14 @@ class MediaServer(resource.Resource):
                 print(data)
                 # Only do this to use or send key
                 # load_pem_public_key(data['public_key'].encode())
-                self.client_public_key = data['public_key']
-                print("cli_pub_key",self.client_public_key)
-                
-                client_public_key = load_pem_public_key(self.client_public_key.encode())
+                client_public_key = load_pem_public_key(data['public_key'].encode())
+                shared_key = self.private_key.exchange(client_public_key)
 
-                self.shared_key = self.private_key.exchange(client_public_key)
-
-                print("sv_private_key", self.private_key)
-                print("sv_public_key", self.public_key)
-
+                session_id = int(data['session_id'])
+                self.sessions[session_id] = (client_public_key, shared_key)
                 return json.dumps({ 'method': 'ACK' }).encode("latin")
             else:
-                request.responseHeaders.addRawHeader(b"content-type", b'text/plain')
+                request.responseHeaders.addRawHeader(b"content-type", b'text/plain') 
                 return b'Methods: /api/hello /api/key_exchange'
         except Exception as e:
             logger.exception(e)
@@ -358,15 +377,18 @@ class MediaServer(resource.Resource):
 
     def diffie_hellman(self, generator, key_size):
         parameters = dh.generate_parameters(generator=generator, key_size=key_size)
-        self.private_key = parameters.generate_private_key()
-        self.public_key = self.private_key.public_key()
+        
+        private_key = parameters.generate_private_key()
+        public_key = private_key.public_key()
+
+        # Check concurrency here...
+        session_id = self.cur_session_id
+        self.sessions_server[session_id] = (public_key, private_key)
+        self.cur_session_id += 1
+
         pn = parameters.parameter_numbers()
 
-        print(self.public_key.__str__())
-
-        salt = None
-        
-        return pn.p, pn.g, salt
+        return pn.p, pn.g, session_id
             
     # Encrypt data
     def encrypt_data(self, derived_key, data): 
