@@ -39,6 +39,7 @@ class Client:
         self.cipher = None
         self.digest = None
         self.ciphermode = None
+        self.session_id = None
     
     def send_message(self, message):
         # Negotiate algorithms
@@ -48,6 +49,8 @@ class Client:
             req = requests.post( f'{SERVER_URL}/api/hello', data=data, headers={ b"content-type": b"application/json" } )
 
             response = req.json()
+
+            self.session_id = response['session_id']
 
             if response['method'] != 'HELLO':
                 print(response)
@@ -60,14 +63,17 @@ class Client:
 
             self.server_public_key = response['public_key']
 
-            p, g, salt, key_size =  response['parameters']['p'],\
-                                    response['parameters']['g'],\
-                                    response['parameters']['salt'],\
-                                    response['parameters']['key_size']
+            p, g, key_size = response['parameters']['p'],\
+                             response['parameters']['g'],\
+                             response['parameters']['key_size']
                                    
-            self.diffie_hellman(p, g, salt, key_size)
+            self.diffie_hellman(p, g, key_size)
 
-            if self.send_message( {'method': 'KEY_EXCHANGE', 'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()} ) is None:
+            if self.send_message( {
+                    'method': 'KEY_EXCHANGE',  
+                    'session_id': self.session_id, 
+                    'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+                } ) is None:
                 logger.debug('Invalid.')
                 exit(1)
             
@@ -82,31 +88,27 @@ class Client:
             iv, data, nonce = self.encrypt_data(derived_key, data)
             data = self.gen_MAC(hmac_key, data)
             
-            if self.send_message( {
-                    'method': 'CONFIRM',
-                    'data': binascii.b2a_base64(data).decode('latin').strip(),
-                    'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-                    'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-                    'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip()
-                } ) is None:
-                logger.debug('Invalid.')
-                exit(1)
-
-            print('server_public_key', self.server_public_key)
-            print('private_key', self.private_key)
-            print('public_key', self.public_key)
+            # if self.send_message( {
+            #         'method': 'CONFIRM',
+            #         'session_id': self.session_id,
+            #         'data': binascii.b2a_base64(data).decode('latin').strip(),
+            #         'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+            #         'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+            #         'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip()
+            #     } ) is None:
+            #     logger.debug('Invalid.')
+            #     exit(1)
 
         elif message['method'] == 'KEY_EXCHANGE':
             req = requests.post( f'{SERVER_URL}/api/key_exchange', data=data, headers={ b"content-type": b"application/json" } )
             response = req.json()
             if response['method'] == 'ACK':
                 return True
-        elif messsage['method'] == 'CONFIRM':
+        elif message['method'] == 'CONFIRM':
             req = requests.post( f'{SERVER_URL}/api/confirm', data=data, headers={ b"content-type": b"application/json" } )
-            response = req.json()
-            
+            #response = req.json()
         else:
-            return
+            return ''
     
     
     def negotiate(self):
@@ -114,7 +116,7 @@ class Client:
         self.send_message( { 'method': 'HELLO', 'ciphers': self.ciphers, 'digests': self.digests, 'ciphermodes': self.ciphermodes } )
 
     
-    def diffie_hellman(self, p, g, salt, key_size):
+    def diffie_hellman(self, p, g, key_size):
         pn = dh.DHParameterNumbers(p, g).parameters()
 
         self.private_key = pn.generate_private_key()
@@ -239,6 +241,7 @@ class Client:
             logger.debug("Must negotiate first.")
             return None
 
+        print(self.digest)
         mac_digest = hmac.HMAC(hmac_key, digest)
         print('cli_mac', data[-digest.digest_size:])
 
@@ -263,32 +266,31 @@ class Client:
             digest = hashes.SHA512()
 
         if salt is None:
-            salt_init = os.urandom(128)
-        else:
-            salt_init = salt
+            salt = os.urandom(128)
+        salt_init = salt
 
         if chunk_id is not None:
             result = bytearray()
             chunk_id_b = bytes(chunk_id)
             media_id_b = bytes(media_id)
-            
-            for b1, b2, b3 in zip(salt_init, [0]*(len(salt_init)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt_init)-len(media_id_b)) + list(media_id_b)):
+
+            for b1, b2, b3 in zip(salt, [0]*(len(salt)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt)-len(media_id_b)) + list(media_id_b)):
                 result.append(b1 ^ b2 ^ b3)
-                
+
             salt_init = bytes(result)
 
         # Check length here and salt
         derived_key = HKDF(
-            algorithm=digest,
-            length=64,  # TODO: revise this value
-            salt=salt_init,
-            info=b'handshake info',
+            algorithm = digest,
+            length = 64,  # TODO: revise this value
+            salt = salt_init,
+            info = b'handshake info',
         ).derive(self.shared_key)
-        
+
         hmac_key = derived_key[len(derived_key)//2:]
         derived_key = derived_key[:len(derived_key)//2]
 
-        return derived_key, hmac_key, salt_init
+        return derived_key, hmac_key, salt
 
 def main():
     print("|--------------------------------------|")
@@ -302,30 +304,35 @@ def main():
 
     client = Client()
 
+    # client or server sends the algorithms to be used and the other sends the response (encoded with public?)
+    # client generates simetric key and sends it encrypted with server public key 
+    # validate all messages with MAC (calculate hash negotiated from last step and prepend it in the end)
+    # get server public key
     client.negotiate()
 
-    # get server public key
-    
-    req = requests.get(f'{SERVER_URL}/api/key')
-    if req:
-        print(req.content)
 
-    # client or server sends the algorithms to be used and the other sends the response (encoded with public?)
-
-
-    # client generates simetric key and sends it encrypted with server public key 
-
-
-    # validate all messages with MAC (calculate hash negotiated from last step and prepend it in the end)
-    
-    
-    req = requests.get(f'{SERVER_URL}/api/list')
+    req = requests.get(f'{SERVER_URL}/api/list', headers={ b"Authorization": bytes(str(client.session_id), 'utf-8') })
     if req.status_code == 200:
         print("Got Server List")
+    response = req.json()
 
-    media_list = req.json()
+    iv = binascii.a2b_base64(response['iv'].encode('latin'))
+    salt = binascii.a2b_base64(response['salt'].encode('latin'))
+    data = binascii.a2b_base64(response['data'].encode('latin'))
+    nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
 
+    # Generate ephemeral key and hmac key
+    derived_key, hmac_key, _ = client.gen_derived_key(salt=salt)
 
+    data = client.verify_MAC(hmac_key, data)
+
+    # Verify MAC
+    if not data:
+        logger.debug("Integrity or authenticity compromised.")
+        exit()
+
+    # Decrypt Data
+    media_list = json.loads(client.decrypt_data(derived_key, iv, data, nonce))
 
     # Present a simple selection menu    
     idx = 0
@@ -360,14 +367,13 @@ def main():
 
     # Get data from server and send it to the ffplay stdin through a pipe
     for chunk in range(media_item['chunks'] + 1):
-        req = requests.get(f'{SERVER_URL}/api/download?id={media_item["id"]}&chunk={chunk}')
+        req = requests.get(f'{SERVER_URL}/api/download?id={media_item["id"]}&chunk={chunk}', headers={ b"Authorization": bytes(str(client.session_id), 'utf-8') })
         response = req.json()
         logger.debug(response)
 
         iv = binascii.a2b_base64(response['iv'].encode('latin'))
         salt = binascii.a2b_base64(response['salt'].encode('latin'))
         data = binascii.a2b_base64(response['data'].encode('latin'))
-        good_data = binascii.a2b_base64(response['good_data'].encode('latin'))
         nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
         media_id = response['media_id']
         chunk_id = response['chunk_id']
@@ -375,11 +381,22 @@ def main():
         # Generate ephemeral key and hmac key
         derived_key, hmac_key, _ = client.gen_derived_key(media_id.encode('latin'), str(chunk_id).encode('latin'), salt)
         
+        # print(media_id)
+        # print(chunk_id)
+        # print(iv)
+        # print(salt)
+        # print(nonce)
+        # print(data)
+        # print('shared', client.shared_key)
+        # print('derived', derived_key)
+        # print('salt ', salt)
+        # print('hmac_key', hmac_key)
+        
         data = client.verify_MAC(hmac_key, data)
 
         # Verify MAC
         if not data:
-            logger.debug("Integrity compromised.")
+            logger.debug("Integrity or authenticity compromised.")
             exit()  
         
         # Decrypt Data

@@ -38,32 +38,60 @@ CATALOG = { '898a08080d1840793122b7e118b27a95d117ebce':
 CATALOG_BASE = 'catalog'
 CHUNK_SIZE = 1024 * 4
 
-PUB_KEY = 0
-PRI_KEY = 1
 
-SHARED_KEY = 1
-CIPHER = 2
-DIGEST = 3
-MODE = 4
+class Session:
+    PUB_KEY = 0
+    PRI_KEY = 1
+    CLIPUB_KEY = 2
+    SHARED_KEY = 3
+    CIPHER = 4
+    DIGEST = 5
+    MODE = 6
+    STATE = 7
+
+
+class State:
+    HELLO = 0
+    KEY_EXCHANGE = 1
+    CONFIRM = 2
+    ALLOW = 3
+
+
+# State 0:
+#     Cliente manda Hello:
+#         Server responde com Hello
+#         com a sua pub key e id da sessao do cliente
+#
+# State 1:
+#     Cliente manda key_exchange:
+#         Server guarda a pub key do cliente
+#         e shared key
+#
+# State 2:
+#     Cliente manda Confirm:
+#         Server verifica se esta tudo bem
+#         e nao bloqueia a sessao se estiver
+#
+# State 3:
+#     Cliente é permitido fazer as outras operaçoes
 
 
 # TODO:
-# server_sessions
+# sessions
 # confirm
 # sequential steps verification
-# encrypt catalogo
 # encrypt all data or send parameters raw
+# encrypt catalogo
 # resto do projeto
-
 
 class MediaServer(resource.Resource):
     isLeaf = True
     cur_session_id = 0
 
     def __init__(self):
-        self.ciphers=[]
-        self.digests=[]
-        self.ciphermodes=[]
+        self.ciphers = []
+        self.digests = []
+        self.ciphermodes = []
 
         self.sessions = {}
 
@@ -74,13 +102,12 @@ class MediaServer(resource.Resource):
 
         
     # Send the list of media files to clients
-    def do_list(self, request):
+    def do_list(self, session_id, request):
 
         #auth = request.getHeader('Authorization')
         #if not auth:
         #    request.setResponseCode(401)
         #    return 'Not authorized'
-
 
         # Build list
         media_list = []
@@ -94,13 +121,28 @@ class MediaServer(resource.Resource):
                 'duration': media['duration']
                 })
 
+        derived_key, hmac_key, salt = self.gen_derived_key(session_id)
+
+        data = json.dumps(media_list, indent=4).encode('latin')
+        
+        data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
+
+        data = self.gen_MAC(session_id, hmac_key, data)
+
         # Return list to client
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-        return json.dumps(media_list, indent=4).encode('latin')
-
+        return json.dumps(
+                {
+                    'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+                    'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+                    'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
+                    'data': binascii.b2a_base64(data).decode('latin').strip(),
+                },indent=4
+            ).encode('latin')
 
     # Send a media chunk to the client
-    def do_download(self, request):
+    def do_download(self, session_id, request):
+        
         logger.debug(f'Download: args: {request.args}')
         
         media_id = request.args.get(b'id', [None])[0]
@@ -146,17 +188,54 @@ class MediaServer(resource.Resource):
         # Open file, seek to correct position and return the chunk
         with open(os.path.join(CATALOG_BASE, media_item['file_name']), 'rb') as f:
             f.seek(offset)
-            good_data = f.read(CHUNK_SIZE)
+            data = f.read(CHUNK_SIZE)
+
+            derived_key, hmac_key, salt = self.gen_derived_key(session_id, media_id.encode('latin'), str(chunk_id).encode('latin'))
+
+            data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
+
+            data = self.gen_MAC(session_id, hmac_key, data)
+
+            # print('derived', derived_key)
+            # print('shared', self.sessions[session_id][Session.SHARED_KEY])
+            # print('salt ', salt)
+            # print('hmac_key', hmac_key)
+
+            # print(media_id)
+            # print(chunk_id)
+            # print(iv)
+            # print(salt)
+            # print(nonce)
+            # print(data)
+
+            ''' client
+           ========CLIENT=========
+<class 'bytes'>
+<class 'bytes'>
+b'898a08080d1840793122b7e118b27a95d117ebce'
+b'0'
+b'898a08080d1840793122b7e118b27a95d117ebce'
+b'0'
+b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\xf3%\xe8\xdd\xf1|\xfc\xda\xf8\xe7\x94\xa0\x95r\x8e\x9bg\x00s\xbax\xca\xdb\xf5\x11Z\xa2\xbb[\x87\xab(\x98.\xdfn\x1f\xc2\x87S\xb2\x18\xff\\\xf7\xcd\xe3\xe8\xdc\x8f\xcd\x8d\xb1\x86\xeb\tG\xef0H\xc5\x00\xdbT\x91\xef\xfcX\x18\xb6D\x95\xe7[j\xe2\xe7\xd6A\x10\x98$\x19\xd9\x182\x1apg\xe6\x06".\xe2\xe6\xd2\x99\xff-\x0c/hBV'
+bytearray(b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\xf3%\xe8\xdd\xf1|\xfc\xda\xf8\xe7\x94\xa0\x95r\x8e\x9bg\x00s\xbax\xca\xdb\xf5\x11Z\xa2\xbb[\x87\xab(\x98.\xdfn\x1f\xc2\x87S\xb2\x18\xff\\\xf7\xcd\xe3\xe8\xdc\x8f\xcd\x8d\xb1\x86\xeb\tG\xef0H\xc5\x00\xdbT\xa9\xd6\xc49(\x8et\xad\xd7?[\xda\xd3\xe6v)\xab\x15+\xebz\x05\x7fAV\xded\x10\x19\x83\xdf\xe7\xfd\xce\x1c;J\n!\x03')
+b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\xf3%\xe8\xdd\xf1|\xfc\xda\xf8\xe7\x94\xa0\x95r\x8e\x9bg\x00s\xbax\xca\xdb\xf5\x11Z\xa2\xbb[\x87\xab(\x98.\xdfn\x1f\xc2\x87S\xb2\x18\xff\\\xf7\xcd\xe3\xe8\xdc\x8f\xcd\x8d\xb1\x86\xeb\tG\xef0H\xc5\x00\xdbT\x91\xef\xfcX\x18\xb6D\x95\xe7[j\xe2\xe7\xd6A\x10\x98$\x19\xd9\x182\x1apg\xe6\x06".\xe2\xe6\xd2\x99\xff-\x0c/hBV'
+
+            '''
+
+            ''' server
+            ========SERVER=========
+<class 'bytes'>
+<class 'bytes'>
+b'898a08080d1840793122b7e118b27a95d117ebce'
+b'0'
+b'898a08080d1840793122b7e118b27a95d117ebce'
+b'0'
+b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\xf3%\xe8\xdd\xf1|\xfc\xda\xf8\xe7\x94\xa0\x95r\x8e\x9bg\x00s\xbax\xca\xdb\xf5\x11Z\xa2\xbb[\x87\xab(\x98.\xdfn\x1f\xc2\x87S\xb2\x18\xff\\\xf7\xcd\xe3\xe8\xdc\x8f\xcd\x8d\xb1\x86\xeb\tG\xef0H\xc5\x00\xdbT\xa9\xd6\xc49(\x8et\xad\xd7?[\xda\xd3\xe6v)\xab\x15+\xebz\x05\x7fAV\xded\x10\x19\x83\xdf\xe7\xfd\xce\x1c;J\n!\x03'
+bytearray(b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\xf3%\xe8\xdd\xf1|\xfc\xda\xf8\xe7\x94\xa0\x95r\x8e\x9bg\x00s\xbax\xca\xdb\xf5\x11Z\xa2\xbb[\x87\xab(\x98.\xdfn\x1f\xc2\x87S\xb2\x18\xff\\\xf7\xcd\xe3\xe8\xdc\x8f\xcd\x8d\xb1\x86\xeb\tG\xef0H\xc5\x00\xdbT\x91\xef\xfcX\x18\xb6D\x95\xe7[j\xe2\xe7\xd6A\x10\x98$\x19\xd9\x182\x1apg\xe6\x06".\xe2\xe6\xd2\x99\xff-\x0c/hBV')
+b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\xf3%\xe8\xdd\xf1|\xfc\xda\xf8\xe7\x94\xa0\x95r\x8e\x9bg\x00s\xbax\xca\xdb\xf5\x11Z\xa2\xbb[\x87\xab(\x98.\xdfn\x1f\xc2\x87S\xb2\x18\xff\\\xf7\xcd\xe3\xe8\xdc\x8f\xcd\x8d\xb1\x86\xeb\tG\xef0H\xc5\x00\xdbT\xa9\xd6\xc49(\x8et\xad\xd7?[\xda\xd3\xe6v)\xab\x15+\xebz\x05\x7fAV\xded\x10\x19\x83\xdf\xe7\xfd\xce\x1c;J\n!\x03'
+'''
 
             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-
-            derived_key, hmac_key, salt = self.gen_derived_key(media_id.encode('latin'), str(chunk_id).encode('latin'))
-
-
-            data, iv, nonce = self.encrypt_data(derived_key, good_data)
-
-            data = self.gen_MAC(hmac_key, data)
-
             return json.dumps(
                     {
                         'media_id': media_id,
@@ -165,7 +244,6 @@ class MediaServer(resource.Resource):
                         'iv': binascii.b2a_base64(iv).decode('latin').strip(),
                         'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
                         'data': binascii.b2a_base64(data).decode('latin').strip(),
-                        'good_data': binascii.b2a_base64(good_data).decode('latin').strip(),
                     },indent=4
                 ).encode('latin')
 
@@ -176,7 +254,6 @@ class MediaServer(resource.Resource):
     # Handle a GET request
     def render_GET(self, request):
         logger.debug(f'Received request for {request.uri}')
-        print(request.uri)
 
         try:
             if request.path == b'/api/protocols':
@@ -188,10 +265,27 @@ class MediaServer(resource.Resource):
             #elif request.uri == 'api/auth':
             #autenticaçao, later on..
             elif request.path == b'/api/list':
-                return self.do_list(request)
+                #session_id = int(response['session_id'])
+                session_id = int(request.getHeader('Authorization'))
+
+                if session_id in self.sessions and self.sessions[session_id][Session.STATE] != State.ALLOW:
+                    request.setResponseCode(401)
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'unauthorized'}).encode('latin')
+                    
+                return self.do_list(session_id, request)
 
             elif request.path == b'/api/download':
-                return self.do_download(request)
+                #session_id = int(response['session_id'])
+
+                session_id = int(request.getHeader('Authorization'))
+                
+                if session_id in self.sessions and self.sessions[session_id][Session.STATE] != State.ALLOW:
+                    request.setResponseCode(401)
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'unauthorized'}).encode('latin')
+
+                return self.do_download(session_id, request)
             else:
                 request.responseHeaders.addRawHeader(b"content-type", b'text/plain')
                 return b'Methods: /api/protocols /api/list /api/download'
@@ -212,42 +306,41 @@ class MediaServer(resource.Resource):
             data = json.loads(request.content.getvalue())
 
             if request.path == b'/api/hello':
-                print(data)
                 ciphers = data['ciphers']
                 digests = data['digests']
                 ciphermodes = data['ciphermodes']
 
                 # TODO: change cipher order
                 if 'ChaCha20' in ciphers:
-                    self.cipher = 'ChaCha20'
+                    cipher = 'ChaCha20'
                 elif 'AES' in ciphers:
-                    self.cipher = 'AES'
+                    cipher = 'AES'
                 elif '3DES' in ciphers:
-                    self.cipher = '3DES'
+                    cipher = '3DES'
                 else:
                     # Ciphers not supported
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                     return json.dumps({'error': 'ciphers not supported'}, indent=4).encode('latin')
                 
                 if 'SHA-256' in digests:
-                    self.digest = 'SHA-256'
+                    digest = 'SHA-256'
                 elif 'SHA-384' in digests:
-                    self.digest = 'SHA-384'
+                    digest = 'SHA-384'
                 elif 'SHA-512' in digests:
-                    self.digest = 'SHA-512'
+                    digest = 'SHA-512'
                 else:
                     # Digest not supported
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                     return json.dumps({'error': 'digests not supported'}, indent=4).encode('latin')
                 
-                if self.cipher == 'ChaCha20':
-                    self.ciphermode = None
+                if cipher == 'ChaCha20':
+                    ciphermode = None
                 elif 'CBC' in ciphermodes:
-                    self.ciphermode = 'CBC'
+                    ciphermode = 'CBC'
                 elif 'GCM' in ciphermodes:
-                    self.ciphermode = 'GCM'
+                    ciphermode = 'GCM'
                 elif 'ECB' in ciphermodes:
-                    self.ciphermode = 'ECB'
+                    ciphermode = 'ECB'
                 else:
                     # Cipher modes not supported
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
@@ -257,13 +350,18 @@ class MediaServer(resource.Resource):
                 
                 p, g, session_id = self.diffie_hellman(2, 1024)
                 
+                self.sessions[session_id][Session.CIPHER] = cipher
+                self.sessions[session_id][Session.MODE] = ciphermode
+                self.sessions[session_id][Session.DIGEST] = digest
+                self.sessions[session_id][Session.STATE] = State.HELLO
+
                 return json.dumps({
                         'method': 'HELLO',
                         'session_id': session_id,
-                        'cipher': self.cipher,
-                        'digest': self.digest,
-                        'ciphermode': self.ciphermode,
-                        'public_key': self.session_server[session_id][0].public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
+                        'cipher': cipher,
+                        'digest': digest,
+                        'ciphermode': ciphermode,
+                        'public_key': self.sessions[session_id][Session.PUB_KEY].public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
                         'parameters': {
                             'p': p,
                             'g': g,
@@ -272,14 +370,25 @@ class MediaServer(resource.Resource):
                     }).encode("latin")
 
             elif request.path == b'/api/key_exchange':
-                print(data)
-                # Only do this to use or send key
-                # load_pem_public_key(data['public_key'].encode())
-                client_public_key = load_pem_public_key(data['public_key'].encode())
-                shared_key = self.private_key.exchange(client_public_key)
 
                 session_id = int(data['session_id'])
-                self.sessions[session_id] = (client_public_key, shared_key)
+                session = self.sessions[session_id]
+                
+                if session[Session.STATE] != State.HELLO:
+                    request.setResponseCode(401)
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'Unauthorized'}).encode('latin')
+                
+                # Only do this to use or send key
+                # load_pem_public_key(data['public_key'].encode())
+                session[Session.STATE] = State.KEY_EXCHANGE
+                session[Session.CLIPUB_KEY] = data['public_key']
+                client_public_key = load_pem_public_key(data['public_key'].encode())
+                session[Session.SHARED_KEY] = session[Session.PRI_KEY].exchange(client_public_key)
+
+                # do confirmation first, then allow
+                session[Session.STATE] = State.ALLOW
+
                 return json.dumps({ 'method': 'ACK' }).encode("latin")
             else:
                 request.responseHeaders.addRawHeader(b"content-type", b'text/plain') 
@@ -291,12 +400,14 @@ class MediaServer(resource.Resource):
             return b''
         
         
-    def gen_MAC(self, hmac_key, data):
-        if self.digest == 'SHA-256':
+    def gen_MAC(self, session_id, hmac_key, data):
+        session = self.sessions[session_id]
+
+        if session[Session.DIGEST] == 'SHA-256':
             digest = hashes.SHA256()
-        elif self.digest == 'SHA-384':
+        elif session[Session.DIGEST] == 'SHA-384':
             digest = hashes.SHA384()
-        elif self.digest == 'SHA-512':
+        elif session[Session.DIGEST] == 'SHA-512':
             digest = hashes.SHA512()
 
         mac_digest = hmac.HMAC(hmac_key, digest)
@@ -306,47 +417,50 @@ class MediaServer(resource.Resource):
         return eval(f'{data}{x}')
 
 
-    def verify_MAC(self, hmac_key, data):
-        if self.digest == 'SHA-256':
+    def verify_MAC(self, session_id, hmac_key, data):
+        session = self.sessions[session_id]
+        
+        if session[Session.DIGEST] == 'SHA-256':
             digest = hashes.SHA256()
-        elif self.digest == 'SHA-384':
+        elif session[Session.DIGEST] == 'SHA-384':
             digest = hashes.SHA384()
-        elif self.digest == 'SHA-512':
+        elif session[Session.DIGEST] == 'SHA-512':
             digest = hashes.SHA512()
         else:
             logger.debug("Must negotiate first.")
             return False
-
+        
         mac_digest = hmac.HMAC(hmac_key, digest)
         mac_digest.update(data[:digest.digest_size])
         logger.debug("sera? vai dar merda?")
 
         try:
-            mac_digest.verify(data[digest.digest_size:])
+            mac_digest.verify(session_id, data[digest.digest_size:])
             return True
         except:
             logger.debug(" e nao e que deu merda!!!!")
             return False
     
-    def gen_derived_key(self, media_id=None, chunk_id=None, salt=None):
-        if self.digest == 'SHA-256':
+    def gen_derived_key(self, session_id, media_id=None, chunk_id=None, salt=None):
+        session = self.sessions[session_id]
+        
+        if session[Session.DIGEST] == 'SHA-256':
             digest = hashes.SHA256()
-        elif self.digest == 'SHA-384':
+        elif session[Session.DIGEST] == 'SHA-384':
             digest = hashes.SHA384()
-        elif self.digest == 'SHA-512':
+        elif session[Session.DIGEST] == 'SHA-512':
             digest = hashes.SHA512()
 
         if salt is None:
-            salt_init = os.urandom(128)
-        else:
-            salt_init = salt
+            salt = os.urandom(128)
+        salt_init = salt
 
         if chunk_id is not None:
             result = bytearray()
             chunk_id_b = bytes(chunk_id)
             media_id_b = bytes(media_id)
             
-            for b1, b2, b3 in zip(salt_init, [0]*(len(salt_init)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt_init)-len(media_id_b)) + list(media_id_b)):
+            for b1, b2, b3 in zip(salt, [0]*(len(salt)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt)-len(media_id_b)) + list(media_id_b)):
                 result.append(b1 ^ b2 ^ b3)
                 
             salt_init = bytes(result)
@@ -357,12 +471,14 @@ class MediaServer(resource.Resource):
             length=64,  # TODO: revise this value
             salt=salt_init,
             info=b'handshake info',
-        ).derive(self.shared_key)
+        ).derive(session[Session.SHARED_KEY])
+
+        print('derived', derived_key)
         
         hmac_key = derived_key[len(derived_key)//2:]
         derived_key = derived_key[:len(derived_key)//2]
 
-        return derived_key, hmac_key, salt_init
+        return derived_key, hmac_key, salt
 
     '''
     ChaCha20 Decrypt
@@ -383,42 +499,49 @@ class MediaServer(resource.Resource):
 
         # Check concurrency here...
         session_id = self.cur_session_id
-        self.sessions_server[session_id] = (public_key, private_key)
         self.cur_session_id += 1
+        self.sessions[session_id] = [None] * 8
+        self.sessions[session_id][Session.PUB_KEY] = public_key
+        self.sessions[session_id][Session.PRI_KEY] = private_key
 
         pn = parameters.parameter_numbers()
 
         return pn.p, pn.g, session_id
             
     # Encrypt data
-    def encrypt_data(self, derived_key, data): 
+    def encrypt_data(self, session_id, derived_key, data): 
+
+        
         ## Key maybe ain't this...
         ## Check Key size..
         key = derived_key
+        session = self.sessions[session_id]
+        cipher = session[Session.CIPHER]
+        ciphermode = session[Session.MODE]
 
         nonce = None
 
-        if self.cipher == 'ChaCha20':
+        if cipher == 'ChaCha20':
             nonce = os.urandom(16)
             algorithm = algorithms.ChaCha20(key, nonce)
-        elif self.cipher == 'AES':
+        elif cipher == 'AES':
             algorithm = algorithms.AES(key)
-        elif self.cipher == '3DES':
+        elif cipher == '3DES':
             algorithm = algorithms.TripleDES(key)
 
         ## Check IV size..
         iv = os.urandom(16)
 
-        if self.cipher == 'ChaCha20':
+        if cipher == 'ChaCha20':
             mode = None
-        elif self.ciphermode == 'CBC':
+        elif ciphermode == 'CBC':
             mode = modes.CBC(iv)
             #Padding is required when using this mode.
             data = self.padding(algorithm.block_size, data)
-        elif self.ciphermode == 'GCM':
+        elif ciphermode == 'GCM':
             mode = modes.GCM(iv)
             # This mode does not require padding.
-        elif self.ciphermode == 'ECB':
+        elif ciphermode == 'ECB':
             mode = modes.ECB(iv)
             #Padding is required when using this mode.
             data = self.padding(algorithm.block_size, data)
@@ -441,25 +564,28 @@ class MediaServer(resource.Resource):
 
 
     # Decrypt data
-    def decrypt_data(self, derived_key, iv, data): 
+    def decrypt_data(self, session_id, derived_key, iv, data): 
         key = derived_key
+        session = self.sessions[session_id]
+        cipher = session[Session.CIPHER]
+        ciphermode = session[Session.MODE]
 
-        if self.cipher == 'ChaCha20': # 256
+        if cipher == 'ChaCha20': # 256
             algorithm = algorithms.ChaCha20(key, nonce)
 
-        elif self.cipher == 'AES': # 128, 192, 256
+        elif cipher == 'AES': # 128, 192, 256
             algorithm = algorithms.AES(key)
 
-        elif self.cipher == '3DES':# 64, 128, 192
+        elif cipher == '3DES':# 64, 128, 192
             algorithm = algorithm.TripleDES(key)
 
         ## Check IV size..
         ## ChaCha mode is None maybe
-        if self.ciphermode == 'CBC':
+        if ciphermode == 'CBC':
             mode = modes.CBC(iv)
-        elif self.ciphermode == 'GCM':
+        elif ciphermode == 'GCM':
             mode = modes.GCM(iv)
-        elif self.ciphermode == 'ECB':
+        elif ciphermode == 'ECB':
             mode = modes.ECB(iv)
 
         decryptor = Cipher(algorithm, mode).decryptor()
