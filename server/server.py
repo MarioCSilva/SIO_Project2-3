@@ -77,7 +77,6 @@ class State:
 
 
 # TODO:
-# sessions
 # confirm
 # sequential steps verification
 # encrypt all data or send parameters raw
@@ -89,17 +88,11 @@ class MediaServer(resource.Resource):
     cur_session_id = 0
 
     def __init__(self):
-        self.ciphers = []
-        self.digests = []
-        self.ciphermodes = []
-
         self.sessions = {}
-
-                
-        # self.ciphers = ['AES','3DES','ChaCha20']
-        # self.digests = ['SHA-256','SHA-384','SHA-512']
-        # self.ciphermodes = ['CBC','GCM','ECB']
-
+        
+        self.ciphers = ['AES','3DES','ChaCha20']
+        self.digests = ['SHA-256','SHA-384','SHA-512']
+        self.ciphermodes = ['CBC','GCM','ECB']
         
     # Send the list of media files to clients
     def do_list(self, session_id, request):
@@ -196,45 +189,6 @@ class MediaServer(resource.Resource):
 
             data = self.gen_MAC(session_id, hmac_key, data)
 
-            # print('derived', derived_key)
-            # print('shared', self.sessions[session_id][Session.SHARED_KEY])
-            # print('salt ', salt)
-            # print('hmac_key', hmac_key)
-
-            # print(media_id)
-            # print(chunk_id)
-            # print(iv)
-            # print(salt)
-            # print(nonce)
-            # print(data)
-
-            ''' client
-           ========CLIENT=========
-<class 'bytes'>
-<class 'bytes'>
-b'898a08080d1840793122b7e118b27a95d117ebce'
-b'0'
-b'898a08080d1840793122b7e118b27a95d117ebce'
-b'0'
-b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\xf3%\xe8\xdd\xf1|\xfc\xda\xf8\xe7\x94\xa0\x95r\x8e\x9bg\x00s\xbax\xca\xdb\xf5\x11Z\xa2\xbb[\x87\xab(\x98.\xdfn\x1f\xc2\x87S\xb2\x18\xff\\\xf7\xcd\xe3\xe8\xdc\x8f\xcd\x8d\xb1\x86\xeb\tG\xef0H\xc5\x00\xdbT\x91\xef\xfcX\x18\xb6D\x95\xe7[j\xe2\xe7\xd6A\x10\x98$\x19\xd9\x182\x1apg\xe6\x06".\xe2\xe6\xd2\x99\xff-\x0c/hBV'
-bytearray(b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\xf3%\xe8\xdd\xf1|\xfc\xda\xf8\xe7\x94\xa0\x95r\x8e\x9bg\x00s\xbax\xca\xdb\xf5\x11Z\xa2\xbb[\x87\xab(\x98.\xdfn\x1f\xc2\x87S\xb2\x18\xff\\\xf7\xcd\xe3\xe8\xdc\x8f\xcd\x8d\xb1\x86\xeb\tG\xef0H\xc5\x00\xdbT\xa9\xd6\xc49(\x8et\xad\xd7?[\xda\xd3\xe6v)\xab\x15+\xebz\x05\x7fAV\xded\x10\x19\x83\xdf\xe7\xfd\xce\x1c;J\n!\x03')
-b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\xf3%\xe8\xdd\xf1|\xfc\xda\xf8\xe7\x94\xa0\x95r\x8e\x9bg\x00s\xbax\xca\xdb\xf5\x11Z\xa2\xbb[\x87\xab(\x98.\xdfn\x1f\xc2\x87S\xb2\x18\xff\\\xf7\xcd\xe3\xe8\xdc\x8f\xcd\x8d\xb1\x86\xeb\tG\xef0H\xc5\x00\xdbT\x91\xef\xfcX\x18\xb6D\x95\xe7[j\xe2\xe7\xd6A\x10\x98$\x19\xd9\x182\x1apg\xe6\x06".\xe2\xe6\xd2\x99\xff-\x0c/hBV'
-
-            '''
-
-            ''' server
-            ========SERVER=========
-<class 'bytes'>
-<class 'bytes'>
-b'898a08080d1840793122b7e118b27a95d117ebce'
-b'0'
-b'898a08080d1840793122b7e118b27a95d117ebce'
-b'0'
-b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\xf3%\xe8\xdd\xf1|\xfc\xda\xf8\xe7\x94\xa0\x95r\x8e\x9bg\x00s\xbax\xca\xdb\xf5\x11Z\xa2\xbb[\x87\xab(\x98.\xdfn\x1f\xc2\x87S\xb2\x18\xff\\\xf7\xcd\xe3\xe8\xdc\x8f\xcd\x8d\xb1\x86\xeb\tG\xef0H\xc5\x00\xdbT\xa9\xd6\xc49(\x8et\xad\xd7?[\xda\xd3\xe6v)\xab\x15+\xebz\x05\x7fAV\xded\x10\x19\x83\xdf\xe7\xfd\xce\x1c;J\n!\x03'
-bytearray(b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\xf3%\xe8\xdd\xf1|\xfc\xda\xf8\xe7\x94\xa0\x95r\x8e\x9bg\x00s\xbax\xca\xdb\xf5\x11Z\xa2\xbb[\x87\xab(\x98.\xdfn\x1f\xc2\x87S\xb2\x18\xff\\\xf7\xcd\xe3\xe8\xdc\x8f\xcd\x8d\xb1\x86\xeb\tG\xef0H\xc5\x00\xdbT\x91\xef\xfcX\x18\xb6D\x95\xe7[j\xe2\xe7\xd6A\x10\x98$\x19\xd9\x182\x1apg\xe6\x06".\xe2\xe6\xd2\x99\xff-\x0c/hBV')
-b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\xf3%\xe8\xdd\xf1|\xfc\xda\xf8\xe7\x94\xa0\x95r\x8e\x9bg\x00s\xbax\xca\xdb\xf5\x11Z\xa2\xbb[\x87\xab(\x98.\xdfn\x1f\xc2\x87S\xb2\x18\xff\\\xf7\xcd\xe3\xe8\xdc\x8f\xcd\x8d\xb1\x86\xeb\tG\xef0H\xc5\x00\xdbT\xa9\xd6\xc49(\x8et\xad\xd7?[\xda\xd3\xe6v)\xab\x15+\xebz\x05\x7fAV\xded\x10\x19\x83\xdf\xe7\xfd\xce\x1c;J\n!\x03'
-'''
-
             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
             return json.dumps(
                     {
@@ -310,41 +264,10 @@ b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\x
                 digests = data['digests']
                 ciphermodes = data['ciphermodes']
 
-                # TODO: change cipher order
-                if 'ChaCha20' in ciphers:
-                    cipher = 'ChaCha20'
-                elif 'AES' in ciphers:
-                    cipher = 'AES'
-                elif '3DES' in ciphers:
-                    cipher = '3DES'
-                else:
-                    # Ciphers not supported
+                cipher, digest, ciphermode = self.choose_algorithms(ciphers, digests, ciphermodes)
+                if cipher is None:
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                    return json.dumps({'error': 'ciphers not supported'}, indent=4).encode('latin')
-                
-                if 'SHA-256' in digests:
-                    digest = 'SHA-256'
-                elif 'SHA-384' in digests:
-                    digest = 'SHA-384'
-                elif 'SHA-512' in digests:
-                    digest = 'SHA-512'
-                else:
-                    # Digest not supported
-                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                    return json.dumps({'error': 'digests not supported'}, indent=4).encode('latin')
-                
-                if cipher == 'ChaCha20':
-                    ciphermode = None
-                elif 'CBC' in ciphermodes:
-                    ciphermode = 'CBC'
-                elif 'GCM' in ciphermodes:
-                    ciphermode = 'GCM'
-                elif 'ECB' in ciphermodes:
-                    ciphermode = 'ECB'
-                else:
-                    # Cipher modes not supported
-                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                    return json.dumps({'error': 'cipher modes not supported'}, indent=4).encode('latin')
+                    return json.dumps({'error': 'algorithm options are not supported'}, indent=4).encode('latin')
 
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                 
@@ -379,17 +302,66 @@ b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\x
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                     return json.dumps({'error': 'Unauthorized'}).encode('latin')
                 
+                session[Session.STATE] = State.KEY_EXCHANGE
+                
                 # Only do this to use or send key
                 # load_pem_public_key(data['public_key'].encode())
-                session[Session.STATE] = State.KEY_EXCHANGE
+                
                 session[Session.CLIPUB_KEY] = data['public_key']
                 client_public_key = load_pem_public_key(data['public_key'].encode())
                 session[Session.SHARED_KEY] = session[Session.PRI_KEY].exchange(client_public_key)
-
-                # do confirmation first, then allow
-                session[Session.STATE] = State.ALLOW
-
+                
                 return json.dumps({ 'method': 'ACK' }).encode("latin")
+            
+            elif request.path == b'/api/confirm':
+                session_id = int(data['session_id'])
+                session = self.sessions[session_id]
+                  
+                if session[Session.STATE] != State.KEY_EXCHANGE:
+                    request.setResponseCode(401)
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'Unauthorized'}).encode('latin')
+                
+                session[Session.STATE] = State.CONFIRM
+                
+                iv = binascii.a2b_base64(data['iv'].encode('latin'))
+                salt = binascii.a2b_base64(data['salt'].encode('latin'))
+                nonce = binascii.a2b_base64(data['nonce'].encode('latin'))
+                
+                algorithms = binascii.a2b_base64(data['algorithms'].encode('latin'))
+                
+                derived_key, hmac_key, _ = self.gen_derived_key(session_id, salt=salt)
+                
+                algorithms = self.verify_MAC(session_id, hmac_key, algorithms)
+
+                # Verify MAC
+                if not algorithms:
+                    logger.debug("Integrity or authenticity compromised.")
+                    request.setResponseCode(404)
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'Integrity or authenticity compromised.'}).encode('latin')
+                
+                # Decrypt Data
+                algorithms = json.loads(self.decrypt_data(session_id, derived_key, iv, algorithms, nonce))
+                ciphers = algorithms['ciphers']
+                digests = algorithms['digests']
+                ciphermodes = algorithms['ciphermodes']
+                choosen_cipher = algorithms['chosen_cipher']
+                choosen_digest = algorithms['chosen_digest']
+                choosen_mode = algorithms['chosen_mode']
+                
+                cipher, digest, ciphermode = self.choose_algorithms(ciphers, digests, ciphermodes)
+                
+                if cipher != choosen_cipher or digest != choosen_digest or ciphermode != choosen_mode:
+                    logger.debug("Algorithms did not match server's preferred choices.")
+                    request.setResponseCode(404)
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'Something wen\'t wrong.'}).encode('latin')
+                
+                session[Session.STATE] = State.ALLOW
+                logger.debug("Confirmed session ID " + str(session_id) + " algorithms and is now allowed to communicate.")
+                request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                return json.dumps({'confirm': 'Session ID Allowed'}).encode('latin')
             else:
                 request.responseHeaders.addRawHeader(b"content-type", b'text/plain') 
                 return b'Methods: /api/hello /api/key_exchange'
@@ -399,6 +371,39 @@ b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\x
             request.responseHeaders.addRawHeader(b"content-type", b"text/plain")
             return b''
         
+        
+    def choose_algorithms(self, ciphers, digests, ciphermodes):
+        if 'ChaCha20' in ciphers:
+            cipher = 'ChaCha20'
+        elif 'AES' in ciphers:
+            cipher = 'AES'
+        elif '3DES' in ciphers:
+            cipher = '3DES'
+        else:
+            return None, None, None
+
+        if 'SHA-256' in digests:
+            digest = 'SHA-256'
+        elif 'SHA-384' in digests:
+            digest = 'SHA-384'
+        elif 'SHA-512' in digests:
+            digest = 'SHA-512'
+        else:
+            return None, None, None
+        
+        if cipher == 'ChaCha20':
+            ciphermode = None
+        elif 'CBC' in ciphermodes:
+            ciphermode = 'CBC'
+        elif 'GCM' in ciphermodes:
+            ciphermode = 'GCM'
+        elif 'ECB' in ciphermodes:
+            ciphermode = 'ECB'
+        else:
+            return None, None, None
+
+        return cipher, digest, ciphermode
+                
         
     def gen_MAC(self, session_id, hmac_key, data):
         session = self.sessions[session_id]
@@ -413,7 +418,6 @@ b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\x
         mac_digest = hmac.HMAC(hmac_key, digest)
         mac_digest.update(data)
         x = mac_digest.finalize()
-        print('server mac', x)
         return eval(f'{data}{x}')
 
 
@@ -431,16 +435,18 @@ b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\x
             return False
         
         mac_digest = hmac.HMAC(hmac_key, digest)
-        mac_digest.update(data[:digest.digest_size])
-        logger.debug("sera? vai dar merda?")
+
+        mac_digest.update(data[:-digest.digest_size])
 
         try:
-            mac_digest.verify(session_id, data[digest.digest_size:])
-            return True
+            logger.info("Mac successfully verified.")
+            mac_digest.verify(data[-digest.digest_size:])
+            return data[:-digest.digest_size]
         except:
-            logger.debug(" e nao e que deu merda!!!!")
-            return False
-    
+            logger.debug("Mac failed verification.")
+            return None
+        
+        
     def gen_derived_key(self, session_id, media_id=None, chunk_id=None, salt=None):
         session = self.sessions[session_id]
         
@@ -473,8 +479,6 @@ b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\x
             info=b'handshake info',
         ).derive(session[Session.SHARED_KEY])
 
-        print('derived', derived_key)
-        
         hmac_key = derived_key[len(derived_key)//2:]
         derived_key = derived_key[:len(derived_key)//2]
 
@@ -564,7 +568,7 @@ b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\x
 
 
     # Decrypt data
-    def decrypt_data(self, session_id, derived_key, iv, data): 
+    def decrypt_data(self, session_id, derived_key, iv, data, nonce=None): 
         key = derived_key
         session = self.sessions[session_id]
         cipher = session[Session.CIPHER]
@@ -572,10 +576,9 @@ b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\x
 
         if cipher == 'ChaCha20': # 256
             algorithm = algorithms.ChaCha20(key, nonce)
-
+            mode = None
         elif cipher == 'AES': # 128, 192, 256
             algorithm = algorithms.AES(key)
-
         elif cipher == '3DES':# 64, 128, 192
             algorithm = algorithm.TripleDES(key)
 
@@ -589,10 +592,11 @@ b'I\x17\xb4\xff\xbc\x0e\xcb\x96R1\x91J\xe7R\xa4\xfd\x7f\xf7\\\x1e\x92\x9f&\xe1\x
             mode = modes.ECB(iv)
 
         decryptor = Cipher(algorithm, mode).decryptor()
-        data = decrytor.update(data)
+        data = decryptor.update(data) + decryptor.finalize()
 
-        data = self.unpadder(algorithm.block_size, data)
-
+        if ciphermode in {'CBC', 'ECB'}:
+            data = self.unpadder(algorithm.block_size, data)
+        
         return data
 
 print("Server started")

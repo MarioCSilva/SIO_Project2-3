@@ -80,24 +80,26 @@ class Client:
             derived_key, hmac_key, salt = self.gen_derived_key()
             
             data = json.dumps({
-                'cipher': self.cipher,
-                'digest': self.digest,
-                'ciphermode': self.ciphermode
-            }).encode()
+                'ciphers': self.ciphers,
+                'chosen_cipher': self.cipher,
+                'digests': self.digests,
+                'chosen_digest': self.digest,
+                'ciphermodes': self.ciphermodes,
+                'chosen_mode': self.ciphermode
+            }).encode('latin')
             
-            iv, data, nonce = self.encrypt_data(derived_key, data)
+            data, iv, nonce = self.encrypt_data(derived_key, data)
+            
             data = self.gen_MAC(hmac_key, data)
             
-            # if self.send_message( {
-            #         'method': 'CONFIRM',
-            #         'session_id': self.session_id,
-            #         'data': binascii.b2a_base64(data).decode('latin').strip(),
-            #         'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-            #         'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-            #         'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip()
-            #     } ) is None:
-            #     logger.debug('Invalid.')
-            #     exit(1)
+            self.send_message( {
+                'method': 'CONFIRM',
+                'session_id': self.session_id,
+                'algorithms': binascii.b2a_base64(data).decode('latin').strip(),
+                'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+                'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+                'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip()
+            } )
 
         elif message['method'] == 'KEY_EXCHANGE':
             req = requests.post( f'{SERVER_URL}/api/key_exchange', data=data, headers={ b"content-type": b"application/json" } )
@@ -106,7 +108,12 @@ class Client:
                 return True
         elif message['method'] == 'CONFIRM':
             req = requests.post( f'{SERVER_URL}/api/confirm', data=data, headers={ b"content-type": b"application/json" } )
-            #response = req.json()
+            response = req.json()
+            logger.debug(response)
+            
+            if req.status_code == 404 or req.status_code == 401:
+                logger.debug("Server did not confirm integrity or authenticity.")
+                exit()
         else:
             return ''
     
@@ -169,7 +176,7 @@ class Client:
         
         encryptor = Cipher(algorithm, mode).encryptor()
         encrypted_data = encryptor.update(data) + encryptor.finalize()
-        
+
         return encrypted_data, iv, nonce
 
 
@@ -191,10 +198,8 @@ class Client:
         if self.cipher == 'ChaCha20': # 256
             algorithm = algorithms.ChaCha20(key, nonce)
             mode = None
-
         elif self.cipher == 'AES': # 128, 192, 256
             algorithm = algorithms.AES(key)
-
         elif self.cipher == '3DES':# 64, 128, 192
             algorithm = algorithm.TripleDES(key)
 
@@ -241,19 +246,16 @@ class Client:
             logger.debug("Must negotiate first.")
             return None
 
-        print(self.digest)
         mac_digest = hmac.HMAC(hmac_key, digest)
-        print('cli_mac', data[-digest.digest_size:])
-
 
         mac_digest.update(data[:-digest.digest_size])
-        logger.debug("sera? vai dar merda?")
 
         try:
+            logger.info("Mac successfully verified.")
             mac_digest.verify(data[-digest.digest_size:])
             return data[:-digest.digest_size]
         except:
-            logger.debug(" e nao e que deu merda!!!!")
+            logger.debug("Mac failed verification.")
             return None
 
 
@@ -380,17 +382,6 @@ def main():
         
         # Generate ephemeral key and hmac key
         derived_key, hmac_key, _ = client.gen_derived_key(media_id.encode('latin'), str(chunk_id).encode('latin'), salt)
-        
-        # print(media_id)
-        # print(chunk_id)
-        # print(iv)
-        # print(salt)
-        # print(nonce)
-        # print(data)
-        # print('shared', client.shared_key)
-        # print('derived', derived_key)
-        # print('salt ', salt)
-        # print('hmac_key', hmac_key)
         
         data = client.verify_MAC(hmac_key, data)
 
