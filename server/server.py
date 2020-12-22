@@ -8,6 +8,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives import hmac
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+
 import logging
 import binascii
 import json
@@ -18,6 +21,9 @@ import random
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -48,7 +54,7 @@ class Session:
     DIGEST = 5
     MODE = 6
     STATE = 7
-
+    USER = 8
 
 class State:
     HELLO = 0
@@ -56,6 +62,10 @@ class State:
     CONFIRM = 2
     ALLOW = 3
 
+class User:
+    USERNAME = 0
+    PASSWORD = 1
+    
 
 # State 0:
 #     Cliente manda Hello:
@@ -77,22 +87,79 @@ class State:
 
 
 # TODO:
-# confirm
-# sequential steps verification
-# encrypt all data or send parameters raw
-# encrypt catalogo
-# resto do projeto
+# ✓ confirm
+# ✓ sequential steps verification
+# x encrypt session_id on headers
+# x encrypt files in catalogo on disk
+# x encrypt all data or send parameters raw
+# x resto do projeto
 
 class MediaServer(resource.Resource):
-    isLeaf = True
     cur_session_id = 0
 
+    #first_time = True
+    
     def __init__(self):
+
+        # if self.first_time:
+        #     # Generate our key
+        #     key = rsa.generate_private_key(
+        #         public_exponent=65537,
+        #         key_size=2048,
+        #     )
+            
+        #     # Write our key to disk for safe keeping
+        #     with open("key.pem", "wb") as f:
+        #         f.write(key.private_bytes(
+        #             encoding=serialization.Encoding.PEM,
+        #             format=serialization.PrivateFormat.TraditionalOpenSSL,
+        #             encryption_algorithm=serialization.BestAvailableEncryption(b"FiJoy$stL7_6XdxMQ3Ffv"),
+        #         ))
+                
+        #     # Various details about who we are. For a self-signed certificate the
+        #     # subject and issuer are always the same.
+        #     subject = issuer = x509.Name([
+        #         x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
+        #         x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"California"),
+        #         x509.NameAttribute(NameOID.LOCALITY_NAME, u"San Francisco"),
+        #         x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"My Company"),
+        #         x509.NameAttribute(NameOID.COMMON_NAME, u"mysite.com"),
+        #     ])
+        #     cert = x509.CertificateBuilder().subject_name(
+        #         subject
+        #     ).issuer_name(
+        #         issuer
+        #     ).public_key(
+        #         key.public_key()
+        #     ).serial_number(
+        #         x509.random_serial_number()
+        #     ).not_valid_before(
+        #         datetime.datetime.utcnow()
+        #     ).not_valid_after(
+        #         # Our certificate will be valid for 10 days
+        #         datetime.datetime.utcnow() + datetime.timedelta(days=10)
+        #     ).add_extension(
+        #         x509.SubjectAlternativeName([x509.DNSName(u"localhost")]),
+        #         critical=False,
+        #     # Sign our certificate with our private key
+        #     ).sign(key, hashes.SHA256())
+        #     # Write our certificate out to disk.
+        #     with open("path/to/certificate.pem", "wb") as f:
+        #         f.write(cert.public_bytes(serialization.Encoding.PEM))
+        # else:
+        #     #server cert
+        #     with open('server/ServerPrat.crt','rb') as f:
+        #         pem_data = f.read()
+
+        #     cert = x509.load_pem_x509_certificate(pem_data, default_backend())
+        #     self.certificate = cert
+
+        self.users = {}
         self.sessions = {}
-        
         self.ciphers = ['AES','3DES','ChaCha20']
         self.digests = ['SHA-256','SHA-384','SHA-512']
         self.ciphermodes = ['CBC','GCM','ECB']
+
         
     # Send the list of media files to clients
     def do_list(self, session_id, request):
