@@ -8,6 +8,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives import hmac
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+
 import logging
 import binascii
 import json
@@ -18,6 +21,9 @@ import random
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -50,7 +56,6 @@ class Session:
     STATE = 7
     USER = 8
 
-
 class State:
     HELLO = 0
     KEY_EXCHANGE = 1
@@ -82,11 +87,12 @@ class User:
 
 
 # TODO:
-# confirm
-# sequential steps verification
-# encrypt all data or send parameters raw
-# encrypt catalogo
-# resto do projeto
+# ✓ confirm
+# ✓ sequential steps verification
+# x encrypt session_id on headers
+# x encrypt files in catalogo on disk
+# x encrypt all data or send parameters raw
+# x resto do projeto
 
 class MediaServer(resource.Resource):
     isLeaf = True
@@ -154,6 +160,7 @@ class MediaServer(resource.Resource):
         self.ciphers = ['AES','3DES','ChaCha20']
         self.digests = ['SHA-256','SHA-384','SHA-512']
         self.ciphermodes = ['CBC','GCM','ECB']
+
         
     # Send the list of media files to clients
     def do_list(self, session_id, request):
