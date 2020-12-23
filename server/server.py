@@ -98,62 +98,9 @@ class MediaServer(resource.Resource):
     isLeaf = True
     cur_session_id = 0
 
-    #first_time = True
     
     def __init__(self):
 
-        # if self.first_time:
-        #     # Generate our key
-        #     key = rsa.generate_private_key(
-        #         public_exponent=65537,
-        #         key_size=2048,
-        #     )
-            
-        #     # Write our key to disk for safe keeping
-        #     with open("key.pem", "wb") as f:
-        #         f.write(key.private_bytes(
-        #             encoding=serialization.Encoding.PEM,
-        #             format=serialization.PrivateFormat.TraditionalOpenSSL,
-        #             encryption_algorithm=serialization.BestAvailableEncryption(b"FiJoy$stL7_6XdxMQ3Ffv"),
-        #         ))
-                
-        #     # Various details about who we are. For a self-signed certificate the
-        #     # subject and issuer are always the same.
-        #     subject = issuer = x509.Name([
-        #         x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
-        #         x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"California"),
-        #         x509.NameAttribute(NameOID.LOCALITY_NAME, u"San Francisco"),
-        #         x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"My Company"),
-        #         x509.NameAttribute(NameOID.COMMON_NAME, u"mysite.com"),
-        #     ])
-        #     cert = x509.CertificateBuilder().subject_name(
-        #         subject
-        #     ).issuer_name(
-        #         issuer
-        #     ).public_key(
-        #         key.public_key()
-        #     ).serial_number(
-        #         x509.random_serial_number()
-        #     ).not_valid_before(
-        #         datetime.datetime.utcnow()
-        #     ).not_valid_after(
-        #         # Our certificate will be valid for 10 days
-        #         datetime.datetime.utcnow() + datetime.timedelta(days=10)
-        #     ).add_extension(
-        #         x509.SubjectAlternativeName([x509.DNSName(u"localhost")]),
-        #         critical=False,
-        #     # Sign our certificate with our private key
-        #     ).sign(key, hashes.SHA256())
-        #     # Write our certificate out to disk.
-        #     with open("path/to/certificate.pem", "wb") as f:
-        #         f.write(cert.public_bytes(serialization.Encoding.PEM))
-        # else:
-        #     #server cert
-        #     with open('server/ServerPrat.crt','rb') as f:
-        #         pem_data = f.read()
-
-        #     cert = x509.load_pem_x509_certificate(pem_data, default_backend())
-        #     self.certificate = cert
 
         self.users = {}
         self.sessions = {}
@@ -273,12 +220,30 @@ class MediaServer(resource.Resource):
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
         return json.dumps({'error': 'unknown'}, indent=4).encode('latin')
 
+    def do_api(self, request):
+
+        method = ''
+        if method == 'PROTOCOL':
+            ...
+        elif method == 'LIST':
+            ...
+        elif method == 'DOWNLOAD':
+            ...
+        request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+        return json.dumps({'error': 'invalid request'}, indent=4).encode('latin')
+        
+
     # Handle a GET request
     def render_GET(self, request):
         logger.debug(f'Received request for {request.uri}')
+        session_id = int(request.getHeader('Authorization'))
+        content = request.getHeader('Content')
 
+        
         try:
-            if request.path == b'/api/protocols':
+            if request.path == b'/api':
+                return self.do_api(session_id, request)
+            elif request.path == b'/api/protocols':
                 return self.do_get_protocols(request)
             elif request.uri == b'/api/key':
             #...chave publica do server
