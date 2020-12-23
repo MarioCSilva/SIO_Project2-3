@@ -429,7 +429,7 @@ def main():
     content = json.dumps({
         'salt': binascii.b2a_base64(salt).decode('latin').strip(),
         'data': binascii.b2a_base64(data).decode('latin').strip(),
-        'iv': binascii.b2a_base64(iv).decode('latin').strip().decode('latin').strip(),
+        'iv': binascii.b2a_base64(iv).decode('latin').strip(),
         'nonce': binascii.b2a_base64(nonce).decode('latin').strip()
     }, indent=4).encode('latin')
 

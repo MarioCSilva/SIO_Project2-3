@@ -300,10 +300,11 @@ class MediaServer(resource.Resource):
 
 
     def encrypted_post(self, request):
+        data = request.content.getvalue()
+                
         session_id = int(data['session_id'])
         session = self.sessions[session_id]
 
-        data = request.content.getvalue()        
         salt = binascii.a2b_base64(data['salt'].encode('latin'))
         iv = binascii.a2b_base64(data['iv'].encode('latin'))
         nonce = binascii.a2b_base64(data['nonce'].encode('latin'))
