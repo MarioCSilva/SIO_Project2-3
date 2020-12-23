@@ -60,8 +60,8 @@ class Session:
     DIGEST = 5
     MODE = 6
     STATE = 7
-    USER = 8
-    CERT = 9
+    CERT = 8
+    ROOT = 9
 
 class State:
     HELLO = 0
@@ -69,9 +69,10 @@ class State:
     CONFIRM = 2
     ALLOW = 3
 
+
 class User:
-    USERNAME = 0
-    PASSWORD = 1
+    CC_TOKEN = 0
+    #PASSWORD = 1
     
 # In authenticated DH, each party acquires a certificate for the other party.
 # The DH public key that each party sends to the other party is digitally
@@ -104,12 +105,16 @@ class User:
 
 
 # TODO:
-# ✓ confirm
-# ✓ sequential steps verification
-# x encrypt session_id on headers
-# x encrypt files in catalogo on disk
-# x encrypt all data or send parameters raw
-# x resto do projeto
+# STATUS | STORY POINTS |  DESCRIPTION
+#   ✓    |              |    confirm
+#   ✓    |      2       |    sequential steps verification
+#   ×    |      5       |    encrypt files in catalogo on disk 
+#   ×    |      1       |    add user certificate to users as a key
+#   ×    |      3       |    validate user's hashed root before operations and update on the session's root
+#   ×    |      8       |    licencas -> certs time
+#   ×    |      8       |    cc token 2factor with certificate
+
+
 
 class MediaServer(resource.Resource):
     isLeaf = True
@@ -117,10 +122,11 @@ class MediaServer(resource.Resource):
 
     
     def __init__(self):
-
-
+        
+        # certificate : cc token, password
         self.users = {}
         self.sessions = {}
+
         self.ciphers = ['AES','3DES','ChaCha20']
         self.digests = ['SHA-256','SHA-384','SHA-512']
         self.ciphermodes = ['CBC','GCM','ECB']
@@ -264,7 +270,8 @@ class MediaServer(resource.Resource):
         iv = binascii.a2b_base64(data['iv'].encode('latin'))
         nonce = binascii.a2b_base64(data['nonce'].encode('latin'))
         
-        content = binascii.a2b_base64(data['content'].encode('latin'))
+        content = binascii.a2b_base64(data['data'].encode('latin'))
+        
         
         derived_key, hmac_key, _ = self.gen_derived_key(session_id, salt=salt)
         data = self.verify_MAC(session_id, hmac_key, content)
@@ -275,7 +282,10 @@ class MediaServer(resource.Resource):
             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
             return json.dumps({'error': 'unknown'}, indent=4).encode('latin')
         
-        method = content['method']
+        
+        data = json.loads(self.decrypt_data(session_id, derived_key, iv, data, nonce))
+
+        method = data['method']
         
         if method == 'PROTOCOL':
             return self.do_get_protocols(request)
@@ -300,9 +310,9 @@ class MediaServer(resource.Resource):
 
 
     def encrypted_post(self, request):
-        data = request.content.getvalue()
-                
-        session_id = int(data['session_id'])
+        data = json.loads(request.content.getvalue())
+        
+        session_id = data['session_id']
         session = self.sessions[session_id]
 
         salt = binascii.a2b_base64(data['salt'].encode('latin'))
@@ -355,7 +365,23 @@ class MediaServer(resource.Resource):
             session[Session.STATE] = State.ALLOW
             logger.debug("Confirmed session ID " + str(session_id) + " algorithms and is now allowed to communicate.")
             
-            return b'ACK'
+            root = os.urandom(128)
+            
+            logger.debug(str(root))
+            
+            derived_key, hmac_key, salt = self.gen_derived_key(session_id)
+            data = json.dumps({'root': binascii.b2a_base64(root).decode('latin').strip()}).encode('latin')
+
+            data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
+            data = self.gen_MAC(session_id, hmac_key, data)
+
+            request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+            return json.dumps({
+                'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+                'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+                'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
+                'data': binascii.b2a_base64(data).decode('latin').strip(),
+            }).encode('latin')
     
     # Handle a GET request
     def render_GET(self, request):
@@ -490,7 +516,7 @@ class MediaServer(resource.Resource):
             
             elif request.path == b'/api':
                 return self.encrypted_post(request)
-                
+
             else:
                 request.responseHeaders.addRawHeader(b"content-type", b'text/plain') 
                 return b'Methods: /api/hello /api/key_exchange'

@@ -82,7 +82,6 @@ class Client:
                 self.negotiate()
 
             challenge = binascii.a2b_base64(response['challenge'].encode('latin'))
-            logger.debug(challenge)
 
             self.cipher = response['cipher']
             self.ciphermode = response['ciphermode']
@@ -180,10 +179,33 @@ class Client:
                 
         elif method == 'CONFIRM':
             req = requests.post( f'{SERVER_URL}/api', data=data, headers={ b"content-type": b"application/json" } )
+            response = req.json()
             
             if req.status_code == 404 or req.status_code == 401:
                 logger.debug("Restarting communications. Reason: server did not confirm integrity or authenticity.")
                 self.negotiate()
+            
+            iv = binascii.a2b_base64(response['iv'].encode('latin'))
+            salt = binascii.a2b_base64(response['salt'].encode('latin'))
+            data = binascii.a2b_base64(response['data'].encode('latin'))
+            nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
+
+            # Generate ephemeral key and hmac key
+            derived_key, hmac_key, _ = self.gen_derived_key(salt=salt)
+
+            data = self.verify_MAC(hmac_key, data)
+
+            # Verify MAC
+            if not data:
+                logger.debug("Integrity or authenticity compromised.")
+                exit()
+
+            # Decrypt Data
+            data = json.loads(self.decrypt_data(derived_key, iv, data, nonce))
+            
+            self.root = binascii.a2b_base64(data['root'].encode('latin'))
+            
+            logger.debug(self.root)
         else:
             return ''
     
@@ -431,10 +453,10 @@ def main():
         'data': binascii.b2a_base64(data).decode('latin').strip(),
         'iv': binascii.b2a_base64(iv).decode('latin').strip(),
         'nonce': binascii.b2a_base64(nonce).decode('latin').strip()
-    }, indent=4).encode('latin')
+    }).encode('latin')
 
     req = requests.get(f'{SERVER_URL}/api', headers={
-        b"Authorization": bytes(str(client.session_id), 'utf-8'),
+        b"Authorization": str(client.session_id),
         b"Content": content
     })
 
@@ -493,16 +515,23 @@ def main():
 
     # Get data from server and send it to the ffplay stdin through a pipe
     for chunk in range(media_item['chunks'] + 1):
-        req = requests.get(f'{SERVER_URL}/api/download?id={media_item["id"]}&chunk={chunk}', headers={ b"Authorization": bytes(str(client.session_id), 'utf-8') })
+        
+        
+        data = {
+            'method': 'DOWNLOAD',
+            'media_id': media_item["id"],
+            'chunk_id': chunk
+        }
+
+
+        
+        
+        req = requests.get(f'{SERVER_URL}/api', headers={ 
+            b"Authorization": bytes(str(client.session_id), 'utf-8') 
+        })
         response = req.json()
         logger.debug(response)
         
-        # data = {
-        #     'method': 'LIST',
-        #     'media_id'
-        #     'chunk_id': ,
-
-        # }
 
         iv = binascii.a2b_base64(response['iv'].encode('latin'))
         salt = binascii.a2b_base64(response['salt'].encode('latin'))
