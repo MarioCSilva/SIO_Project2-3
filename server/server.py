@@ -1,3 +1,11 @@
+import logging
+import binascii
+import json
+import os
+import math
+import random
+import sys
+from os import scandir
 #!/usr/bin/env python
 
 from twisted.web import server, resource
@@ -7,16 +15,10 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.asymmetric import padding as asymmetric_padding
 from cryptography.hazmat.primitives import hmac
 from cryptography import x509
 from cryptography.x509.oid import NameOID
-
-import logging
-import binascii
-import json
-import os
-import math
-import random
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dh
@@ -24,6 +26,10 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from certificate_authority import CA
+from cryptography.exceptions import InvalidSignature
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -55,6 +61,7 @@ class Session:
     MODE = 6
     STATE = 7
     USER = 8
+    CERT = 9
 
 class State:
     HELLO = 0
@@ -66,6 +73,16 @@ class User:
     USERNAME = 0
     PASSWORD = 1
     
+# In authenticated DH, each party acquires a certificate for the other party.
+# The DH public key that each party sends to the other party is digitally
+# signed by the sender using the private key that corresponds to the public key on the sender’s certificate.
+# A reader might ask that if the two parties are going to use certificates anyway, why
+# not fall back on the “traditional” approach of having one of the parties encrypt a session key with the other
+# party’s public key, since, subsequently, only the other party would be able to retrieve the session key through
+# decryption with their private key. While that point is valid, DH does give you additional security because it
+# creates a shared secret without any transmission of the secret between the two parties.
+
+
 
 # State 0:
 #     Cliente manda Hello:
@@ -108,7 +125,24 @@ class MediaServer(resource.Resource):
         self.digests = ['SHA-256','SHA-384','SHA-512']
         self.ciphermodes = ['CBC','GCM','ECB']
 
+        self.ca = CA('./crl')
         
+        for cert in scandir('certificate'):
+            self.cert, valid = self.ca.load_cert(cert)
+            if not valid:
+                ## Ask CA for another Certificate
+                exit(1)
+            
+        self.cert_pub_key = self.cert.public_key()
+        
+        # password would keep the file safe from attackers
+        with open("server_key.pem", "rb") as key_file:
+            self.cert_priv_key = serialization.load_pem_private_key(
+                key_file.read(),
+                password=None,
+            )
+            
+            
     # Send the list of media files to clients
     def do_list(self, session_id, request):
 
@@ -220,63 +254,123 @@ class MediaServer(resource.Resource):
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
         return json.dumps({'error': 'unknown'}, indent=4).encode('latin')
 
-    def do_api(self, request):
+    def encrypted_get(self, request):
+        session_id = int(request.getHeader('Authorization'))
+        session = self.sessions[session_id]
 
-        method = ''
+        data = json.loads(request.getHeader('Content'))
+        
+        salt = binascii.a2b_base64(data['salt'].encode('latin'))
+        iv = binascii.a2b_base64(data['iv'].encode('latin'))
+        nonce = binascii.a2b_base64(data['nonce'].encode('latin'))
+        
+        content = binascii.a2b_base64(data['content'].encode('latin'))
+        
+        derived_key, hmac_key, _ = self.gen_derived_key(session_id, salt=salt)
+        data = self.verify_MAC(session_id, hmac_key, content)
+
+        if not data:
+            logger.debug("Integrity or authenticity compromised.")
+            request.setResponseCode(404)
+            request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+            return json.dumps({'error': 'unknown'}, indent=4).encode('latin')
+        
+        method = content['method']
+        
         if method == 'PROTOCOL':
-            ...
+            return self.do_get_protocols(request)
         elif method == 'LIST':
-            ...
+
+            if session_id in self.sessions and self.sessions[session_id][Session.STATE] != State.ALLOW:
+                request.setResponseCode(401)
+                request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                return json.dumps({'error': 'unauthorized'}).encode('latin')
+                
+            return self.do_list(session_id, request)
         elif method == 'DOWNLOAD':
-            ...
+
+            if session_id in self.sessions and self.sessions[session_id][Session.STATE] != State.ALLOW:
+                request.setResponseCode(401)
+                request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                return json.dumps({'error': 'unauthorized'}).encode('latin')
+
+            return self.do_download(session_id, request)
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
         return json.dumps({'error': 'invalid request'}, indent=4).encode('latin')
-        
 
+
+    def encrypted_post(self, request):
+        session_id = int(data['session_id'])
+        session = self.sessions[session_id]
+
+        data = request.content.getvalue()        
+        salt = binascii.a2b_base64(data['salt'].encode('latin'))
+        iv = binascii.a2b_base64(data['iv'].encode('latin'))
+        nonce = binascii.a2b_base64(data['nonce'].encode('latin'))
+        
+        content = binascii.a2b_base64(data['content'].encode('latin'))
+        
+        derived_key, hmac_key, _ = self.gen_derived_key(session_id, salt=salt)
+            
+        data = self.verify_MAC(session_id, hmac_key, content)
+
+        # Verify MAC
+        if not data:
+            logger.debug("Integrity or authenticity compromised.")
+            request.setResponseCode(404)
+            request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+            return json.dumps({'error': "something wen't wrong"}).encode('latin')
+        
+        # Decrypt Data
+        data = json.loads(self.decrypt_data(session_id, derived_key, iv, data, nonce))
+
+        method = data['method']
+        
+        if method == 'CONFIRM':
+            if session[Session.STATE] != State.KEY_EXCHANGE:
+                request.setResponseCode(401)
+                request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                return json.dumps({'error': 'Unauthorized'}).encode('latin')
+            
+            session[Session.STATE] = State.CONFIRM
+            
+            algorithms = data['algorithms']
+        
+            ciphers = algorithms['ciphers']
+            digests = algorithms['digests']
+            ciphermodes = algorithms['ciphermodes']
+            choosen_cipher = algorithms['chosen_cipher']
+            choosen_digest = algorithms['chosen_digest']
+            choosen_mode = algorithms['chosen_mode']
+            
+            cipher, digest, ciphermode = self.choose_algorithms(ciphers, digests, ciphermodes)
+            
+            if cipher != choosen_cipher or digest != choosen_digest or ciphermode != choosen_mode:
+                logger.debug("Algorithms did not match server's preferred choices.")
+                request.setResponseCode(404)
+                request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                return json.dumps({'error': "something wen't wrong."}).encode('latin')
+            
+            session[Session.STATE] = State.ALLOW
+            logger.debug("Confirmed session ID " + str(session_id) + " algorithms and is now allowed to communicate.")
+            
+            return b'ACK'
+    
     # Handle a GET request
     def render_GET(self, request):
         logger.debug(f'Received request for {request.uri}')
-        session_id = int(request.getHeader('Authorization'))
-        content = request.getHeader('Content')
 
-        
         try:
-            if request.path == b'/api':
-                return self.do_api(session_id, request)
-            elif request.path == b'/api/protocols':
-                return self.do_get_protocols(request)
-            elif request.uri == b'/api/key':
-            #...chave publica do server
+            if request.path == b'/api/cert':
+                #...chave publica do server
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                return json.dumps({"data":"key"}).encode("latin")
-            #elif request.uri == 'api/auth':
-            #autenticaçao, later on..
-            elif request.path == b'/api/list':
-                #session_id = int(response['session_id'])
-                session_id = int(request.getHeader('Authorization'))
-
-                if session_id in self.sessions and self.sessions[session_id][Session.STATE] != State.ALLOW:
-                    request.setResponseCode(401)
-                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                    return json.dumps({'error': 'unauthorized'}).encode('latin')
-                    
-                return self.do_list(session_id, request)
-
-            elif request.path == b'/api/download':
-                #session_id = int(response['session_id'])
-
-                session_id = int(request.getHeader('Authorization'))
-                
-                if session_id in self.sessions and self.sessions[session_id][Session.STATE] != State.ALLOW:
-                    request.setResponseCode(401)
-                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                    return json.dumps({'error': 'unauthorized'}).encode('latin')
-
-                return self.do_download(session_id, request)
+                return json.dumps( {"cert": binascii.b2a_base64(self.cert.public_bytes(Encoding.PEM)).decode('latin').strip()}, indent=4 ).encode('latin')
+            elif request.path == b'/api':
+                return self.encrypted_get(request)
             else:
                 request.responseHeaders.addRawHeader(b"content-type", b'text/plain')
-                return b'Methods: /api/protocols /api/list /api/download'
-
+                return b'Methods: /api/cert /api'
+            
         except Exception as e:
             logger.exception(e)
             request.setResponseCode(500)
@@ -293,10 +387,20 @@ class MediaServer(resource.Resource):
             data = json.loads(request.content.getvalue())
 
             if request.path == b'/api/hello':
+
+                client_cert = x509.load_pem_x509_certificate(binascii.a2b_base64(data['cert']))
+
+                # Validate Client's Certificate
+                if not self.ca.validate_cert(client_cert):
+                    logger.debug("Client's Certificate Invalid.")
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'certificate invalid'}, indent=4).encode('latin')
+                logger.debug("Client's Certificate Validated.")
+                
                 ciphers = data['ciphers']
                 digests = data['digests']
                 ciphermodes = data['ciphermodes']
-
+                
                 cipher, digest, ciphermode = self.choose_algorithms(ciphers, digests, ciphermodes)
                 if cipher is None:
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
@@ -310,7 +414,11 @@ class MediaServer(resource.Resource):
                 self.sessions[session_id][Session.MODE] = ciphermode
                 self.sessions[session_id][Session.DIGEST] = digest
                 self.sessions[session_id][Session.STATE] = State.HELLO
+                self.sessions[session_id][Session.CERT] = client_cert
 
+                challenge = os.urandom(256)
+                logger.debug(challenge)
+                
                 return json.dumps({
                         'method': 'HELLO',
                         'session_id': session_id,
@@ -322,11 +430,12 @@ class MediaServer(resource.Resource):
                             'p': p,
                             'g': g,
                             'key_size': 1024,
-                        }
+                        },
+                        'challenge': binascii.b2a_base64(challenge).decode('latin').strip()
                     }).encode("latin")
 
             elif request.path == b'/api/key_exchange':
-
+                
                 session_id = int(data['session_id'])
                 session = self.sessions[session_id]
                 
@@ -336,65 +445,51 @@ class MediaServer(resource.Resource):
                     return json.dumps({'error': 'Unauthorized'}).encode('latin')
                 
                 session[Session.STATE] = State.KEY_EXCHANGE
-                
-                # Only do this to use or send key
-                # load_pem_public_key(data['public_key'].encode())
-                
                 session[Session.CLIPUB_KEY] = data['public_key']
                 client_public_key = load_pem_public_key(data['public_key'].encode())
                 session[Session.SHARED_KEY] = session[Session.PRI_KEY].exchange(client_public_key)
-                
-                return json.dumps({ 'method': 'ACK' }).encode("latin")
-            
-            elif request.path == b'/api/confirm':
-                session_id = int(data['session_id'])
-                session = self.sessions[session_id]
-                  
-                if session[Session.STATE] != State.KEY_EXCHANGE:
-                    request.setResponseCode(401)
-                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                    return json.dumps({'error': 'Unauthorized'}).encode('latin')
-                
-                session[Session.STATE] = State.CONFIRM
-                
-                iv = binascii.a2b_base64(data['iv'].encode('latin'))
-                salt = binascii.a2b_base64(data['salt'].encode('latin'))
-                nonce = binascii.a2b_base64(data['nonce'].encode('latin'))
-                
-                algorithms = binascii.a2b_base64(data['algorithms'].encode('latin'))
-                
-                derived_key, hmac_key, _ = self.gen_derived_key(session_id, salt=salt)
-                
-                algorithms = self.verify_MAC(session_id, hmac_key, algorithms)
 
-                # Verify MAC
-                if not algorithms:
-                    logger.debug("Integrity or authenticity compromised.")
-                    request.setResponseCode(404)
+                challenge = binascii.a2b_base64(data['challenge'].encode('latin'))
+                signed_challenge = binascii.a2b_base64(data['signed_challenge'].encode('latin'))
+
+                if 'SHA-256' == session[Session.DIGEST]:
+                    sign_digest = hashes.SHA256()
+                elif 'SHA-384' == session[Session.DIGEST]:
+                    sign_digest = hashes.SHA384()
+                elif 'SHA-512' == session[Session.DIGEST]:
+                    sign_digest = hashes.SHA512()
+
+                try:
+                    session[Session.CERT].public_key().verify(
+                        signed_challenge,
+                        challenge,
+                        asymmetric_padding.PSS(
+                            mgf=asymmetric_padding.MGF1(sign_digest),
+                            salt_length=asymmetric_padding.PSS.MAX_LENGTH
+                        ),
+                        sign_digest
+                    )
+                except InvalidSignature:
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                    return json.dumps({'error': 'Integrity or authenticity compromised.'}).encode('latin')
+                    return json.dumps({'error': 'something went wrong'}, indent=4).encode('latin')
+                    
+                signed_challenge = self.cert_priv_key.sign(
+                    challenge,
+                    asymmetric_padding.PSS(
+                        mgf=asymmetric_padding.MGF1(sign_digest),
+                        salt_length=asymmetric_padding.PSS.MAX_LENGTH
+                    ),
+                    sign_digest
+                )
+    
+                return json.dumps({
+                    'challenge': binascii.b2a_base64(challenge).decode('latin').strip(),
+                    'signed_challenge': binascii.b2a_base64(signed_challenge).decode('latin').strip()
+                }).encode("latin")
+            
+            elif request.path == b'/api':
+                return self.encrypted_post(request)
                 
-                # Decrypt Data
-                algorithms = json.loads(self.decrypt_data(session_id, derived_key, iv, algorithms, nonce))
-                ciphers = algorithms['ciphers']
-                digests = algorithms['digests']
-                ciphermodes = algorithms['ciphermodes']
-                choosen_cipher = algorithms['chosen_cipher']
-                choosen_digest = algorithms['chosen_digest']
-                choosen_mode = algorithms['chosen_mode']
-                
-                cipher, digest, ciphermode = self.choose_algorithms(ciphers, digests, ciphermodes)
-                
-                if cipher != choosen_cipher or digest != choosen_digest or ciphermode != choosen_mode:
-                    logger.debug("Algorithms did not match server's preferred choices.")
-                    request.setResponseCode(404)
-                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                    return json.dumps({'error': 'Something wen\'t wrong.'}).encode('latin')
-                
-                session[Session.STATE] = State.ALLOW
-                logger.debug("Confirmed session ID " + str(session_id) + " algorithms and is now allowed to communicate.")
-                request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                return json.dumps({'confirm': 'Session ID Allowed'}).encode('latin')
             else:
                 request.responseHeaders.addRawHeader(b"content-type", b'text/plain') 
                 return b'Methods: /api/hello /api/key_exchange'
@@ -537,7 +632,7 @@ class MediaServer(resource.Resource):
         # Check concurrency here...
         session_id = self.cur_session_id
         self.cur_session_id += 1
-        self.sessions[session_id] = [None] * 8
+        self.sessions[session_id] = [None] * 10
         self.sessions[session_id][Session.PUB_KEY] = public_key
         self.sessions[session_id][Session.PRI_KEY] = private_key
 
@@ -547,8 +642,6 @@ class MediaServer(resource.Resource):
             
     # Encrypt data
     def encrypt_data(self, session_id, derived_key, data): 
-
-        
         ## Key maybe ain't this...
         ## Check Key size..
         key = derived_key

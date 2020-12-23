@@ -1,6 +1,10 @@
 import logging
+import os
+from os import scandir
 from datetime import datetime
 
+import cryptography
+from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -13,12 +17,11 @@ logger.setLevel(logging.WARNING)
 logger.setLevel(logging.ERROR)
 logger.setLevel(logging.DEBUG)
 
-
 class CA:
-    trusted_CA = './rootCA'
-    
-    def __init__(self, certs_path, crl):
-        self.certs_path = certs_path
+    trusted_CA = '../rootCA/'
+
+    def __init__(self, crl_dir):
+        #self.certs_path = certs_path
         self.ca_roots = {}
         self.ca_intermediate = {}
         
@@ -27,7 +30,7 @@ class CA:
         # Certificates Revokation list
         self.crl_certs = []
 
-        self.load_certs(trusted_CA, trusted = True)
+        self.load_certs(self.trusted_CA, trusted = True)
 
         # # server
         # self.validator = Certificate_Validator(['/etc/ssl/certs/'], ['certs/server/PTEID/'], 'certs/server/crls/')
@@ -47,34 +50,34 @@ class CA:
                 self.ca_roots[cert.subject.rfc4514_string()] = cert
             else:
                 self.ca_intermediate[cert.subject.rfc4514_string()] = cert
-                
+
 
     def load_cert(self, file): 
         logger.debug(f'Loading {file}')
 
-        now = datetime.datetime.now()
+        now = datetime.now()
 
-        with open(file, 'rb') as f:
-            pem_data = f.read()
+        with open(file, 'rb') as fp:
+            pem_data = fp.read()
             if '.cer' in file.name:
-                cert = x509.load_der_x509_certificate(pem_data, backend=None)
+                cert = x509.load_der_x509_certificate(pem_data)
             else:
-                cert = x509.load_pem_x509_certificate(pem_data, backend=None)
-                
+                cert = x509.load_pem_x509_certificate(pem_data)
+
         if cert.not_valid_after < now:
             # print(file, "EXPIRED (", cert.not_valid_after, ')') 
             return cert, False
         else:
             return cert, True   
 
-        
+
     def validate_cert(self, cert):
         logger.debug(f'Validating {cert.subject.rfc4514_string()}')
-        
+
         # load current crl
         self.crl_cert = []
-        self.load_crls_cert(cert)
-
+        self.load_crl()
+        
         chain = self.get_chain(cert, [])
         is_valid = self.validate_chain(chain)
 
@@ -87,8 +90,8 @@ class CA:
                 continue
             crl_cert = self.load_crl_cert(obj)
             self.crl_certs.append(crl)
-        
-        
+
+
     def load_crl_cert(self, file):
         with open(file, 'rb') as fp:
             crl_cert_data = fp.read()
@@ -104,15 +107,15 @@ class CA:
 
         # Check if this certificate is self signed
         # if it is, then the chain is complete
-        if issuer == subject and subject in self.roots:
+        if issuer == subject and subject in self.ca_roots:
             return chain
 
         # check if the issuer is in the trusted certificates
-        if issuer in self.roots:
-            return self.get_chain(chain, self.roots[issuer])
-        elif issuer in self.intermediate_certs:
-            return self.get_chain(chain, self.intermediate_certs[issuer])
-        
+        if issuer in self.ca_roots:
+            return self.get_chain(self.ca_roots[issuer], chain)
+        elif issuer in self.ca_intermediate:
+            return self.get_chain(self.ca_intermediate[issuer], chain)
+
 
     def validate_chain(self, chain):
         if len(chain) == 1:
@@ -132,7 +135,7 @@ class CA:
         except cryptography.exceptions.InvalidSignature:
             return False
 
-        for crl in self.crls:
+        for crl in self.crl_certs:
             # verify cert in crl expiration
             if datetime.now() > crl.next_update:
                 logger.debug(f"{cert.subject.rfc4514_string()} is expired")

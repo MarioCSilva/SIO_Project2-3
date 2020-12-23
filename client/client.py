@@ -7,6 +7,8 @@ import random
 import subprocess
 import time
 import sys
+from os import scandir
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import Encoding, ParameterFormat, PublicFormat, load_pem_private_key, load_pem_public_key
 from cryptography.hazmat.backends import default_backend  
 from cryptography.hazmat.primitives.asymmetric import rsa  
@@ -14,9 +16,16 @@ from cryptography.hazmat.primitives import hmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.asymmetric import padding as asymmetric_padding
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography import x509
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from certificate_authority import CA
+
+from cryptography.exceptions import InvalidSignature
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -27,6 +36,7 @@ logger.setLevel(logging.ERROR)
 logger.setLevel(logging.DEBUG)
 
 SERVER_URL = 'http://127.0.0.1:8080'
+
 
 class Client:
     def __init__(self):
@@ -40,26 +50,60 @@ class Client:
         self.digest = None
         self.ciphermode = None
         self.session_id = None
+
+        self.ca = CA('./crl')
+        
+        for cert in scandir('certificate'):
+            self.cert, valid = self.ca.load_cert(cert)
+            if not valid:
+                ## Ask CA for another Certificate
+                exit(1)
+            
+        self.cert_pub_key = self.cert.public_key()
+
+        # password would keep the file safe from attackers
+        with open("client_key.pem", "rb") as key_file:
+            self.cert_priv_key = serialization.load_pem_private_key(
+                key_file.read(),
+                password=None,
+            )
+
     
-    def send_message(self, message):
+    def send_message(self, message, method):
         # Negotiate algorithms
         data = json.dumps( message ).encode()
 
-        if message['method'] == 'HELLO':
+        if method == 'HELLO':
             req = requests.post( f'{SERVER_URL}/api/hello', data=data, headers={ b"content-type": b"application/json" } )
-
             response = req.json()
 
-            self.session_id = response['session_id']
-
             if response['method'] != 'HELLO':
-                print(response)
-                exit(1)
-                
+                logger.debug("Restarting communications")
+                self.negotiate()
+
+            challenge = binascii.a2b_base64(response['challenge'].encode('latin'))
+            logger.debug(challenge)
+
             self.cipher = response['cipher']
             self.ciphermode = response['ciphermode']
             self.digest = response['digest']
-            print(response)
+            self.session_id = response['session_id']
+
+            if 'SHA-256' == self.digest:
+                sign_digest = hashes.SHA256()
+            elif 'SHA-384' == self.digest:
+                sign_digest = hashes.SHA384()
+            elif 'SHA-512' == self.digest:
+                sign_digest = hashes.SHA512()
+
+            signed_challenge = self.cert_priv_key.sign(
+                challenge,
+                asymmetric_padding.PSS(
+                    mgf=asymmetric_padding.MGF1(sign_digest),
+                    salt_length=asymmetric_padding.PSS.MAX_LENGTH
+                ),
+                sign_digest
+            )
 
             self.server_public_key = response['public_key']
 
@@ -69,58 +113,120 @@ class Client:
                                    
             self.diffie_hellman(p, g, key_size)
 
-            if self.send_message( {
-                    'method': 'KEY_EXCHANGE',  
+            self.send_message( {
+                    'method': 'KEY_EXCHANGE',
                     'session_id': self.session_id, 
-                    'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
-                } ) is None:
-                logger.debug('Invalid.')
-                exit(1)
+                    'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
+                    'challenge': binascii.b2a_base64(challenge).decode('latin').strip(),
+                    'signed_challenge':  binascii.b2a_base64(signed_challenge).decode('latin').strip()
+            }, 'KEY_EXCHANGE' )
+
+        elif method == 'KEY_EXCHANGE':
+            req = requests.post( f'{SERVER_URL}/api/key_exchange', data=data, headers={ b"content-type": b"application/json" } )
+            response = req.json() #TODO: em todos os req.json() verificar se tem a key 'error'
             
+            logger.debug(response)
+            challenge = binascii.a2b_base64(response['challenge'].encode('latin'))
+            signed_challenge = binascii.a2b_base64(response['signed_challenge'].encode('latin'))
+            
+            if 'SHA-256' == self.digest:
+                sign_digest = hashes.SHA256()
+            elif 'SHA-384' == self.digest:
+                sign_digest = hashes.SHA384()
+            elif 'SHA-512' == self.digest:
+                sign_digest = hashes.SHA512()
+                
+            try:
+                self.server_cert.public_key().verify(
+                    signed_challenge,
+                    challenge,
+                    asymmetric_padding.PSS(
+                        mgf=asymmetric_padding.MGF1(sign_digest),
+                        salt_length=asymmetric_padding.PSS.MAX_LENGTH
+                    ),
+                    sign_digest
+                )
+            except InvalidSignature:
+                logger.debug("Restarting communications")
+                self.negotiate()
+
             derived_key, hmac_key, salt = self.gen_derived_key()
             
             data = json.dumps({
-                'ciphers': self.ciphers,
-                'chosen_cipher': self.cipher,
-                'digests': self.digests,
-                'chosen_digest': self.digest,
-                'ciphermodes': self.ciphermodes,
-                'chosen_mode': self.ciphermode
+                'method': 'CONFIRM',
+                'algorithms': {
+                    'ciphers': self.ciphers,
+                    'chosen_cipher': self.cipher,
+                    'digests': self.digests,
+                    'chosen_digest': self.digest,
+                    'ciphermodes': self.ciphermodes,
+                    'chosen_mode': self.ciphermode
+                },
             }).encode('latin')
             
             data, iv, nonce = self.encrypt_data(derived_key, data)
             
             data = self.gen_MAC(hmac_key, data)
             
-            self.send_message( {
-                'method': 'CONFIRM',
+            data = {
                 'session_id': self.session_id,
-                'algorithms': binascii.b2a_base64(data).decode('latin').strip(),
                 'salt': binascii.b2a_base64(salt).decode('latin').strip(),
                 'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-                'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip()
-            } )
-
-        elif message['method'] == 'KEY_EXCHANGE':
-            req = requests.post( f'{SERVER_URL}/api/key_exchange', data=data, headers={ b"content-type": b"application/json" } )
-            response = req.json()
-            if response['method'] == 'ACK':
-                return True
-        elif message['method'] == 'CONFIRM':
-            req = requests.post( f'{SERVER_URL}/api/confirm', data=data, headers={ b"content-type": b"application/json" } )
-            response = req.json()
-            logger.debug(response)
+                'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
+                'content': binascii.b2a_base64(data).decode('latin').strip()
+            }
+            
+            self.send_message(data, 'CONFIRM')
+                
+        elif method == 'CONFIRM':
+            req = requests.post( f'{SERVER_URL}/api', data=data, headers={ b"content-type": b"application/json" } )
             
             if req.status_code == 404 or req.status_code == 401:
-                logger.debug("Server did not confirm integrity or authenticity.")
-                exit()
+                logger.debug("Restarting communications. Reason: server did not confirm integrity or authenticity.")
+                self.negotiate()
         else:
             return ''
     
     
     def negotiate(self):
-        """Send supported client suited ciphers."""
-        self.send_message( { 'method': 'HELLO', 'ciphers': self.ciphers, 'digests': self.digests, 'ciphermodes': self.ciphermodes } )
+        """Send supported client suited ciphers encrypted with client certificate private key."""
+        
+        req = requests.get(f'{SERVER_URL}/api/cert')
+        if req.status_code == 200:
+            print("Got Server's Certificate")
+        response = req.json()
+
+        server_cert = binascii.a2b_base64(response['cert'])
+        
+        self.server_cert = x509.load_pem_x509_certificate(server_cert)
+        
+        # Validate Server's Certificate
+        if not self.ca.validate_cert(self.server_cert):
+            logger.debug("Server's Certificate Invalid.")
+            exit(1)
+            
+        logger.debug("Server's Certificate Validated.")
+        
+        self.server_pub_key = self.server_cert.public_key()
+        
+        data = {
+            'cert': binascii.b2a_base64(self.cert.public_bytes(Encoding.PEM)).decode('latin').strip(),
+            'method': 'HELLO',
+            'ciphers': self.ciphers,
+            'digests': self.digests,
+            'ciphermodes': self.ciphermodes
+        }
+
+        # content2 = self.server_pub_key.encrypt(
+        #     content,
+        #     asymmetric_padding.OAEP(
+        #         mgf=asymmetric_padding.MGF1(algorithm=hashes.SHA256()),
+        #         algorithm=hashes.SHA256(),
+        #         label=None
+        #     )
+        # )
+        
+        self.send_message(data, 'HELLO')
 
     
     def diffie_hellman(self, p, g, key_size):
@@ -312,8 +418,26 @@ def main():
     # get server public key
     client.negotiate()
 
+    data = json.dumps({
+        'method': 'LIST'
+    }).encode('latin')
 
-    req = requests.get(f'{SERVER_URL}/api/list', headers={ b"Authorization": bytes(str(client.session_id), 'utf-8') })
+    derived_key, hmac_key, salt = client.gen_derived_key()
+    data, iv, nonce = client.encrypt_data(derived_key, data)
+    data = client.gen_MAC(hmac_key, data)
+
+    content = json.dumps({
+        'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+        'data': binascii.b2a_base64(data).decode('latin').strip(),
+        'iv': binascii.b2a_base64(iv).decode('latin').strip().decode('latin').strip(),
+        'nonce': binascii.b2a_base64(nonce).decode('latin').strip()
+    }, indent=4).encode('latin')
+
+    req = requests.get(f'{SERVER_URL}/api', headers={
+        b"Authorization": bytes(str(client.session_id), 'utf-8'),
+        b"Content": content
+    })
+
     if req.status_code == 200:
         print("Got Server List")
     response = req.json()
@@ -372,6 +496,13 @@ def main():
         req = requests.get(f'{SERVER_URL}/api/download?id={media_item["id"]}&chunk={chunk}', headers={ b"Authorization": bytes(str(client.session_id), 'utf-8') })
         response = req.json()
         logger.debug(response)
+        
+        # data = {
+        #     'method': 'LIST',
+        #     'media_id'
+        #     'chunk_id': ,
+
+        # }
 
         iv = binascii.a2b_base64(response['iv'].encode('latin'))
         salt = binascii.a2b_base64(response['salt'].encode('latin'))
