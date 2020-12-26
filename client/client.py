@@ -126,15 +126,10 @@ class Client:
                 choice = input('> ')
                 if choice == '1':
                     logger.debug('Inserting 2-factor CC Token')
+                    cc_authenticator = CC_Authenticator()
                     
-                    while True:
-                        cc_authenticator = CC_Authenticator()
-                        if cc_authenticator != False:
-                            break
-                        time.sleep(1)
-                        logger.debug('Não deu chico')
-                    cc_token = cc_authenticator.get_certificate()
-                    logger.debug(cc_token)
+                    self.cc_cert = cc_authenticator.get_certificate()
+                    cc_token = binascii.b2a_base64(self.cc_cert.public_bytes(Encoding.PEM)).decode('latin').strip()
                 
             self.send_message( {
                     'method': 'KEY_EXCHANGE',

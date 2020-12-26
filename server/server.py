@@ -467,16 +467,24 @@ class MediaServer(resource.Resource):
                 
                 session_id = int(data['session_id'])
                 session = self.sessions[session_id]
-                
                 if '0' in data['choice']:
                     logger.debug('No 2-factor chosen.')
                 elif '1' in data['choice']:
                     logger.debug('CC Token chosen for 2-factor authentication.')
-                    # TODO:
-                    # if has token registed
+                    if self.users[session[Session.CERT]] != b'':
                         # validate cc_token
-                    # else:
-                        # add 2 factor to account
+                        if not self.ca.validate_cert(binascii.a2b_base64(data['choice']['1'])):
+                            logger.debug("Client's Certificate Invalid.")
+                            request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                            return json.dumps({'error': 'certificate invalid'}, indent=4).encode('latin')
+                        logger.debug("Client's Certificate Validated.")
+                    else:
+                        if not self.ca.validate_cert(x509.load_pem_x509_certificate(binascii.a2b_base64(data['choice']['1']))):
+                            logger.debug("Client's Certificate Invalid.")
+                            request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                            return json.dumps({'error': 'certificate invalid'}, indent=4).encode('latin')
+                        self.users[session[Session.CERT]] = data['choice']['1']
+                        logger.debug('Sucessfully added 2-factor to this user.')
                     pass
                 
                 if session[Session.STATE] != State.HELLO:

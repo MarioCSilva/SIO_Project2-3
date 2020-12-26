@@ -19,6 +19,7 @@ logger.setLevel(logging.DEBUG)
 
 class CA:
     trusted_CA = '../rootCA/'
+    intermediate = '../rootCA/intermediate'
 
     def __init__(self, crl_dir):
         #self.certs_path = certs_path
@@ -31,7 +32,8 @@ class CA:
         self.crl_certs = []
 
         self.load_certs(self.trusted_CA, trusted = True)
-
+        self.load_certs(self.intermediate)
+        
         # # server
         # self.validator = Certificate_Validator(['/etc/ssl/certs/'], ['certs/server/PTEID/'], 'certs/server/crls/')
 
@@ -45,6 +47,7 @@ class CA:
                 continue
             cert, valid = self.load_cert(obj)
             if not valid:
+                print(obj.name)
                 continue
             if trusted:
                 self.ca_roots[cert.subject.rfc4514_string()] = cert
@@ -77,8 +80,9 @@ class CA:
         # load current crl
         self.crl_cert = []
         self.load_crl()
-        
+
         chain = self.get_chain(cert, [])
+        logger.debug(chain)
         is_valid = self.validate_chain(chain)
 
         return is_valid
@@ -101,7 +105,7 @@ class CA:
 
     def get_chain(self, cert, chain):
         chain.append(cert)
-
+        
         issuer = cert.issuer.rfc4514_string()
         subject = cert.subject.rfc4514_string()
 
@@ -109,12 +113,14 @@ class CA:
         # if it is, then the chain is complete
         if issuer == subject and subject in self.ca_roots:
             return chain
-
         # check if the issuer is in the trusted certificates
         if issuer in self.ca_roots:
             return self.get_chain(self.ca_roots[issuer], chain)
         elif issuer in self.ca_intermediate:
             return self.get_chain(self.ca_intermediate[issuer], chain)
+        # Couldn't find this Certificate so it's hardcoded here
+        elif issuer == 'CN=ECRaizEstado,O=SCEE,C=PT':
+            return chain
 
 
     def validate_chain(self, chain):
