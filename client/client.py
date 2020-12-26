@@ -144,7 +144,6 @@ class Client:
             req = requests.post( f'{SERVER_URL}/api/key_exchange', data=data, headers={ b"content-type": b"application/json" } )
             response = req.json() #TODO: em todos os req.json() verificar se tem a key 'error'
             
-            logger.debug(response)
             challenge = binascii.a2b_base64(response['challenge'].encode('latin'))
             signed_challenge = binascii.a2b_base64(response['signed_challenge'].encode('latin'))
             
@@ -459,14 +458,8 @@ def main():
     # Get a list of media files
     print("Contacting Server")
     
-    # TODO: Secure the session
-
     client = Client()
 
-    # client or server sends the algorithms to be used and the other sends the response (encoded with public?)
-    # client generates simetric key and sends it encrypted with server public key 
-    # validate all messages with MAC (calculate hash negotiated from last step and prepend it in the end)
-    # get server public key
     client.negotiate()
 
     data = json.dumps({
@@ -545,22 +538,29 @@ def main():
     # Get data from server and send it to the ffplay stdin through a pipe
     for chunk in range(media_item['chunks'] + 1):
         
-        
-        data = {
+        data = json.dumps({
             'method': 'DOWNLOAD',
             'media_id': media_item["id"],
             'chunk_id': chunk
-        }
+        }).encode('latin')
 
+        derived_key, hmac_key, salt = client.gen_derived_key()
+        data, iv, nonce = client.encrypt_data(derived_key, data)
+        data = client.gen_MAC(hmac_key, data)
 
-        
-        
+        content = json.dumps({
+            'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+            'data': binascii.b2a_base64(data).decode('latin').strip(),
+            'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+            'nonce': binascii.b2a_base64(nonce).decode('latin').strip()
+        }).encode('latin')
+
         req = requests.get(f'{SERVER_URL}/api', headers={ 
-            b"Authorization": bytes(str(client.session_id), 'utf-8') 
+            b"Authorization": str(client.session_id),
+            b"Content": content
         })
-        response = req.json()
-        logger.debug(response)
         
+        response = req.json()
 
         iv = binascii.a2b_base64(response['iv'].encode('latin'))
         salt = binascii.a2b_base64(response['salt'].encode('latin'))

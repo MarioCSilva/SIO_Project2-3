@@ -189,11 +189,10 @@ class MediaServer(resource.Resource):
             ).encode('latin')
 
     # Send a media chunk to the client
-    def do_download(self, session_id, request):
+    def do_download(self, session_id, media_id, chunk_id, request):
         
-        logger.debug(f'Download: args: {request.args}')
+        logger.debug(f'Download: args: {media_id} {chunk_id}')
         
-        media_id = request.args.get(b'id', [None])[0]
         logger.debug(f'Download: id: {media_id}')
 
         # Check if the media_id is not None as it is required
@@ -201,9 +200,6 @@ class MediaServer(resource.Resource):
             request.setResponseCode(400)
             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
             return json.dumps({'error': 'invalid media id'}).encode('latin')
-        
-        # Convert bytes to str
-        media_id = media_id.decode('latin')
 
         # Search media_id in the catalog
         if media_id not in CATALOG:
@@ -215,10 +211,9 @@ class MediaServer(resource.Resource):
         media_item = CATALOG[media_id]
 
         # Check if a chunk is valid
-        chunk_id = request.args.get(b'chunk', [b'0'])[0]
         valid_chunk = False
         try:
-            chunk_id = int(chunk_id.decode('latin'))
+            chunk_id = int(chunk_id)
             if chunk_id >= 0 and chunk_id  < math.ceil(media_item['file_size'] / CHUNK_SIZE):
                 valid_chunk = True
         except:
@@ -290,7 +285,6 @@ class MediaServer(resource.Resource):
         if method == 'PROTOCOL':
             return self.do_get_protocols(request)
         elif method == 'LIST':
-
             if session_id in self.sessions and self.sessions[session_id][Session.STATE] != State.ALLOW:
                 request.setResponseCode(401)
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
@@ -298,13 +292,12 @@ class MediaServer(resource.Resource):
                 
             return self.do_list(session_id, request)
         elif method == 'DOWNLOAD':
-
             if session_id in self.sessions and self.sessions[session_id][Session.STATE] != State.ALLOW:
                 request.setResponseCode(401)
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                 return json.dumps({'error': 'unauthorized'}).encode('latin')
-
-            return self.do_download(session_id, request)
+            
+            return self.do_download(session_id, data['media_id'], data['chunk_id'], request)
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
         return json.dumps({'error': 'invalid request'}, indent=4).encode('latin')
 
@@ -445,7 +438,6 @@ class MediaServer(resource.Resource):
                 self.sessions[session_id][Session.CERT] = client_cert
 
                 challenge = os.urandom(256)
-                logger.debug(challenge)
                 
                 return json.dumps({
                         'method': 'HELLO',
