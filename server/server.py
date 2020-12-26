@@ -365,12 +365,9 @@ class MediaServer(resource.Resource):
             session[Session.STATE] = State.ALLOW
             logger.debug("Confirmed session ID " + str(session_id) + " algorithms and is now allowed to communicate.")
             
-            root = os.urandom(128)
-            
-            logger.debug(str(root))
             
             derived_key, hmac_key, salt = self.gen_derived_key(session_id)
-            data = json.dumps({'root': binascii.b2a_base64(root).decode('latin').strip()}).encode('latin')
+            data = json.dumps({'methods': {'GET': ['/api', '/api/cert'], 'POST': ['/api/']}}).encode('latin')
 
             data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
             data = self.gen_MAC(session_id, hmac_key, data)
@@ -424,6 +421,10 @@ class MediaServer(resource.Resource):
                     return json.dumps({'error': 'certificate invalid'}, indent=4).encode('latin')
                 logger.debug("Client's Certificate Validated.")
                 
+                if client_cert not in self.users:
+                    self.users[client_cert] = b''
+                    logger.info('Registering client...')
+                
                 ciphers = data['ciphers']
                 digests = data['digests']
                 ciphermodes = data['ciphermodes']
@@ -458,6 +459,7 @@ class MediaServer(resource.Resource):
                             'g': g,
                             'key_size': 1024,
                         },
+                        '2-factor': {'0': 'None', '1': 'CC Token'},
                         'challenge': binascii.b2a_base64(challenge).decode('latin').strip()
                     }).encode("latin")
 
@@ -465,6 +467,17 @@ class MediaServer(resource.Resource):
                 
                 session_id = int(data['session_id'])
                 session = self.sessions[session_id]
+                
+                if '0' in data['choice']:
+                    logger.debug('No 2-factor chosen.')
+                elif '1' in data['choice']:
+                    logger.debug('CC Token chosen for 2-factor authentication.')
+                    # TODO:
+                    # if has token registed
+                        # validate cc_token
+                    # else:
+                        # add 2 factor to account
+                    pass
                 
                 if session[Session.STATE] != State.HELLO:
                     request.setResponseCode(401)
@@ -626,13 +639,18 @@ class MediaServer(resource.Resource):
                 
             salt_init = bytes(result)
 
+        digest_shared_key = hashes.Hash(digest)
+        digest_shared_key.update(session[Session.SHARED_KEY])
+        shared_key = digest_shared_key.finalize()
+        session[Session.SHARED_KEY] = shared_key
+        
         # Check length here and salt
         derived_key = HKDF(
             algorithm=digest,
             length=64,  # TODO: revise this value
             salt=salt_init,
             info=b'handshake info',
-        ).derive(session[Session.SHARED_KEY])
+        ).derive(shared_key)
 
         hmac_key = derived_key[len(derived_key)//2:]
         derived_key = derived_key[:len(derived_key)//2]

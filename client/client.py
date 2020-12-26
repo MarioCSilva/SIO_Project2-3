@@ -24,8 +24,11 @@ from cryptography import x509
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from certificate_authority import CA
+from cc_authenticator import CC_Authenticator
+
 
 from cryptography.exceptions import InvalidSignature
+
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -111,12 +114,34 @@ class Client:
                              response['parameters']['key_size']
                                    
             self.diffie_hellman(p, g, key_size)
+            
+            
+            print("Choose one of the following authentication methods:")  
+            for k, v in response['2-factor'].items():
+                print(f"{k} - {v}")   
 
+            choice = ''
+            cc_token = ''
+            while choice not in response['2-factor'].keys():
+                choice = input('> ')
+                if choice == '1':
+                    logger.debug('Inserting 2-factor CC Token')
+                    
+                    while True:
+                        cc_authenticator = CC_Authenticator()
+                        if cc_authenticator != False:
+                            break
+                        time.sleep(1)
+                        logger.debug('Não deu chico')
+                    cc_token = cc_authenticator.get_certificate()
+                    logger.debug(cc_token)
+                
             self.send_message( {
                     'method': 'KEY_EXCHANGE',
                     'session_id': self.session_id, 
                     'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
                     'challenge': binascii.b2a_base64(challenge).decode('latin').strip(),
+                    'choice': {choice: cc_token},
                     'signed_challenge':  binascii.b2a_base64(signed_challenge).decode('latin').strip()
             }, 'KEY_EXCHANGE' )
 
@@ -203,9 +228,12 @@ class Client:
             # Decrypt Data
             data = json.loads(self.decrypt_data(derived_key, iv, data, nonce))
             
-            self.root = binascii.a2b_base64(data['root'].encode('latin'))
-            
-            logger.debug(self.root)
+            self.methods = data['methods']
+
+            for k in self.methods:
+                print(k)
+                for v in self.methods[k]:
+                    print(f' {v}')
         else:
             return ''
     
@@ -216,6 +244,7 @@ class Client:
         req = requests.get(f'{SERVER_URL}/api/cert')
         if req.status_code == 200:
             print("Got Server's Certificate")
+            
         response = req.json()
 
         server_cert = binascii.a2b_base64(response['cert'])
@@ -409,13 +438,18 @@ class Client:
 
             salt_init = bytes(result)
 
+        digest_shared_key = hashes.Hash(digest)
+        digest_shared_key.update(self.shared_key)
+        shared_key = digest_shared_key.finalize()
+        self.shared_key = shared_key
+
         # Check length here and salt
         derived_key = HKDF(
             algorithm = digest,
             length = 64,  # TODO: revise this value
             salt = salt_init,
             info = b'handshake info',
-        ).derive(self.shared_key)
+        ).derive(shared_key)
 
         hmac_key = derived_key[len(derived_key)//2:]
         derived_key = derived_key[:len(derived_key)//2]
