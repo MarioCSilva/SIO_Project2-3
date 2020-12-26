@@ -35,5 +35,6 @@ class CC_Authenticator():
                     self.cert = x509.load_der_x509_certificate(bytes(self.attr_list['CITIZEN AUTHENTICATION CERTIFICATE']['CKA_VALUE']), default_backend())
                     break
                 
+                
     def get_certificate(self):
         return self.cert

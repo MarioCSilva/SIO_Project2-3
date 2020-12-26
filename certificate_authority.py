@@ -82,7 +82,6 @@ class CA:
         self.load_crl()
 
         chain = self.get_chain(cert, [])
-        logger.debug(chain)
         is_valid = self.validate_chain(chain)
 
         return is_valid
