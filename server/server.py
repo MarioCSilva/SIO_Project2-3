@@ -107,21 +107,25 @@ class User:
 
 # TODO:
 # STATUS | STORY POINTS |  DESCRIPTION
-#   ✓    |              |    confirm
+#   ✓    |      3       |    confirm
 #   ✓    |      2       |    sequential steps verification
-#   ×    |      5       |    encrypt files in catalogo on disk 
+#   ✓    |      5       |    encrypt files in catalogo on disk 
 #   ✓    |      1       |    add user certificate to users as a key
 #   ✓    |      3       |    validate user's hashed root before operations and update on the session's root
 #   ✓    |      8       |    licencas -> certs time
 #   ✓    |      8       |    cc token 2factor with certificate
-
+#   ×    |      8       |    make the report
+#   ×    |      3       |    finish the authentication diagram
+#   ×    |     13       |    refactor and test all cipher algorithms
+#
+# Total Story Points: 30
 
 
 class MediaServer(resource.Resource):
     isLeaf = True
     cur_session_id = 0
-    first_time = True
-
+    first_time = False
+    FILES_NONCE = b'%t\xc2+G\x1c\xd5\xf7\x07O\xa5\x98hh\x14\x0b'
     
     def __init__(self):
         
@@ -155,78 +159,48 @@ class MediaServer(resource.Resource):
             
         associated_data = input('Password to decrypt files: ')
         
+        self.files_key = self.cert_priv_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.BestAvailableEncryption(b'mypassword')
+        )[:32]
+        
         if self.first_time:
+            self.encrypt_files(self.files_key)
+
+    def encrypt_files(self, key):        
+        # Generate a random 96-bit IV.
+        for obj in scandir(CATALOG_BASE + '/'):
+            if obj.is_dir() or not (any(ext in obj.name for ext in ['mp3'])):
+                continue
             
-            iv, self.encrypt_files(self.cert_priv_key, dir_files, associated_data)
-
-        
-        
-        def encrypt_files(key, dir_files, associated_data):
-            # Generate a random 96-bit IV.
-            for obj in scandir(dir_files):
-                if obj.is_dir() or not (any(ext in obj.name for ext in ['mp3'])):
-                    continue
-
-                fp = open(obj.name, 'rb')
-                data = fp.read()
-                fp.close()
-
-                # Construct an AES-GCM Cipher object with the given key and a
-                # randomly generated IV.
+            fp = open(CATALOG_BASE + '/' + obj.name, 'rb')
+            data = fp.read()
+            fp.close()
+            
+            media_item = CATALOG[obj.name.split('.')[0]]
+            fp = open(CATALOG_BASE + '/' + obj.name, 'wb')
+            
+            for i in range(0, media_item['file_size'], CHUNK_SIZE):
+                chunk = data[i:i+CHUNK_SIZE]
                 encryptor = Cipher(
-                    algorithms.AES(key),
-                    modes.GCM(iv),
+                    algorithms.ChaCha20(key, nonce=self.FILES_NONCE),
+                    None
                 ).encryptor()
 
-                # associated_data will be authenticated but not encrypted,
-                # it must also be passed in on decryption.
-                # encryptor.authenticate_additional_data(associated_data)
-                encryptor.authenticate_additional_data(b'9PjDQfxXT3&bGzt*OzM2')
-
-                # Encrypt the plaintext and get the associated ciphertext.
-                # GCM does not require padding.
+                text = encryptor.update(chunk) + encryptor.finalize()
                 
-                text = encryptor.update(data) + encryptor.finalize()
-
-                fp = open(obj.name, 'wb')
                 fp.write(text)
-                fp.close()
+            fp.close()
 
-            return (iv, encryptor.tag)
-
-        def decrypt_file(key, associated_data, iv, ciphertext, tag):
-            # Construct a Cipher object, with the key, iv, and additionally the
-            # GCM tag used for authenticating the message.
-            iv = b"E\x1f~\xa9*h\xef\xc7\xe2'\x8d\xd7Xm\xdd\x1e"
-            
-            decryptor = Cipher(
-                algorithms.AES(key),
-                modes.GCM(iv, tag),
-            ).decryptor()
-
-            # We put associated_data back in or the tag will fail to verify
-            # when we finalize the decryptor.
-            # decryptor.authenticate_additional_data(associated_data)
-            decryptor.authenticate_additional_data(b'9PjDQfxXT3&bGzt*OzM2')
-            
-            # Decryption gets us the authenticated plaintext.
-            # If the tag does not match an InvalidTag exception will be raised.
-            return decryptor.update(ciphertext) + decryptor.finalize()
-
-        iv, ciphertext, tag = encrypt(
-            key,
-            b"a secret message!",
-            b"authenticated but not encrypted payload"
-        )
-
-        print(decrypt(
-            key,
-            b"authenticated but not encrypted payload",
-            iv,
-            ciphertext,
-            tag
-        ))
-            
+    def decrypt_file_chunk(self, key, ciphertext):
+        decryptor = Cipher(
+            algorithms.ChaCha20(key, nonce=self.FILES_NONCE),
+            None
+        ).decryptor()
+        
+        return decryptor.update(ciphertext) + decryptor.finalize()
+    
             
     # Send the list of media files to clients
     def do_list(self, session_id, request):
@@ -330,10 +304,12 @@ class MediaServer(resource.Resource):
 
         offset = chunk_id * CHUNK_SIZE
 
-        # Open file, seek to correct position and return the chunk
-        with open(os.path.join(CATALOG_BASE, media_item['file_name']), 'rb') as f:
+        file_name = os.path.join(CATALOG_BASE, media_item['file_name'])
+        with open(file_name, 'rb') as f:
             f.seek(offset)
             data = f.read(CHUNK_SIZE)
+            
+            data = self.decrypt_file_chunk(self.files_key, data)
 
             derived_key, hmac_key, salt = self.gen_derived_key(session_id, media_id.encode('latin'), str(chunk_id).encode('latin'))
 
