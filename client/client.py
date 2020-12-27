@@ -562,6 +562,83 @@ def main():
         
         response = req.json()
 
+        # Client has no licence
+        if 'error' in response:
+            logger.debug('Client has no licence')
+            
+            data = json.dumps({
+                'method': 'LICENCE',
+                'media_id': media_item["id"],
+            }).encode('latin')
+
+            derived_key, hmac_key, salt = client.gen_derived_key()
+            data, iv, nonce = client.encrypt_data(derived_key, data)
+            data = client.gen_MAC(hmac_key, data)
+
+            content = json.dumps({
+                'session_id': client.session_id,
+                'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+                'content': binascii.b2a_base64(data).decode('latin').strip(),
+                'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+                'nonce': binascii.b2a_base64(nonce).decode('latin').strip()
+            }).encode('latin')
+            
+            response = requests.post(f'{SERVER_URL}/api', data=content, headers={ b"content-type": b"application/json" })
+
+            response = response.json()
+            
+            iv = binascii.a2b_base64(response['iv'].encode('latin'))
+            salt = binascii.a2b_base64(response['salt'].encode('latin'))
+            data = binascii.a2b_base64(response['data'].encode('latin'))
+            nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
+            data = binascii.a2b_base64(response['data'].encode('latin'))
+            
+            # Generate ephemeral key and hmac key
+            derived_key, hmac_key, _ = client.gen_derived_key(salt=salt)
+            
+            data = client.verify_MAC(hmac_key, data)
+
+            # Verify MAC
+            if not data:
+                logger.debug("Integrity or authenticity compromised.")
+                exit()  
+            
+            # Decrypt Data
+            data = json.loads(client.decrypt_data(derived_key, iv, data, nonce))
+            licence = x509.load_pem_x509_certificate(binascii.a2b_base64(data['licence'].encode('latin')))
+    
+            logger.debug(licence)
+            
+            data = json.dumps({
+                'method': 'DOWNLOAD',
+                'media_id': media_item["id"],
+                'chunk_id': chunk
+            }).encode('latin')
+
+            derived_key, hmac_key, salt = client.gen_derived_key()
+            data, iv, nonce = client.encrypt_data(derived_key, data)
+            data = client.gen_MAC(hmac_key, data)
+
+            content = json.dumps({
+                'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+                'data': binascii.b2a_base64(data).decode('latin').strip(),
+                'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+                'nonce': binascii.b2a_base64(nonce).decode('latin').strip()
+            }).encode('latin')
+
+            req = requests.get(f'{SERVER_URL}/api', headers={ 
+                b"Authorization": str(client.session_id),
+                b"Content": content
+            })
+            
+            response = req.json()
+            
+            if 'error' in response:
+                logger.debug('Something went wrong.')
+                exit()
+            
+
+
         iv = binascii.a2b_base64(response['iv'].encode('latin'))
         salt = binascii.a2b_base64(response['salt'].encode('latin'))
         data = binascii.a2b_base64(response['data'].encode('latin'))

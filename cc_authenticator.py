@@ -17,7 +17,7 @@ class CC_Authenticator():
         self.slots = self.pkcs11.getSlotList()
 
         for slot in self.slots:
-            print(self.pkcs11.getTokenInfo(slot))
+            #print(self.pkcs11.getTokenInfo(slot))
             self.all_attr = list(PyKCS11.CKA.keys())
             self.all_attr = [e for e in self.all_attr if isinstance(e, int)]
             
@@ -29,7 +29,7 @@ class CC_Authenticator():
 
                 attr = dict(zip(map(PyKCS11.CKA.get, self.all_attr), attr))
 
-                print('Label:', attr['CKA_LABEL'])
+                #print('Label:', attr['CKA_LABEL'])
                 self.attr_list[attr['CKA_LABEL']] = attr
                 if attr['CKA_LABEL']=='CITIZEN AUTHENTICATION CERTIFICATE':
                     self.cert = x509.load_der_x509_certificate(bytes(self.attr_list['CITIZEN AUTHENTICATION CERTIFICATE']['CKA_VALUE']), default_backend())

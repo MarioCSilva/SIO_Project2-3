@@ -6,6 +6,7 @@ import math
 import random
 import sys
 from os import scandir
+import datetime
 #!/usr/bin/env python
 
 from twisted.web import server, resource
@@ -61,7 +62,6 @@ class Session:
     MODE = 6
     STATE = 7
     CERT = 8
-    ROOT = 9
 
 class State:
     HELLO = 0
@@ -72,6 +72,7 @@ class State:
 
 class User:
     CC_TOKEN = 0
+    LICENCES = 1
     #PASSWORD = 1
     
 # In authenticated DH, each party acquires a certificate for the other party.
@@ -109,16 +110,17 @@ class User:
 #   ✓    |              |    confirm
 #   ✓    |      2       |    sequential steps verification
 #   ×    |      5       |    encrypt files in catalogo on disk 
-#   ×    |      1       |    add user certificate to users as a key
-#   ×    |      3       |    validate user's hashed root before operations and update on the session's root
-#   ×    |      8       |    licencas -> certs time
-#   ×    |      8       |    cc token 2factor with certificate
+#   ✓    |      1       |    add user certificate to users as a key
+#   ✓    |      3       |    validate user's hashed root before operations and update on the session's root
+#   ✓    |      8       |    licencas -> certs time
+#   ✓    |      8       |    cc token 2factor with certificate
 
 
 
 class MediaServer(resource.Resource):
     isLeaf = True
     cur_session_id = 0
+    first_time = True
 
     
     def __init__(self):
@@ -141,12 +143,89 @@ class MediaServer(resource.Resource):
             
         self.cert_pub_key = self.cert.public_key()
         
+        password = input('Password for ceritificate: ')
+        
         # password would keep the file safe from attackers
         with open("server_key.pem", "rb") as key_file:
             self.cert_priv_key = serialization.load_pem_private_key(
                 key_file.read(),
+                # password=password,
                 password=None,
             )
+            
+        associated_data = input('Password to decrypt files: ')
+        
+        if self.first_time:
+            
+            iv, self.encrypt_files(self.cert_priv_key, dir_files, associated_data)
+
+        
+        
+        def encrypt_files(key, dir_files, associated_data):
+            # Generate a random 96-bit IV.
+            for obj in scandir(dir_files):
+                if obj.is_dir() or not (any(ext in obj.name for ext in ['mp3'])):
+                    continue
+
+                fp = open(obj.name, 'rb')
+                data = fp.read()
+                fp.close()
+
+                # Construct an AES-GCM Cipher object with the given key and a
+                # randomly generated IV.
+                encryptor = Cipher(
+                    algorithms.AES(key),
+                    modes.GCM(iv),
+                ).encryptor()
+
+                # associated_data will be authenticated but not encrypted,
+                # it must also be passed in on decryption.
+                # encryptor.authenticate_additional_data(associated_data)
+                encryptor.authenticate_additional_data(b'9PjDQfxXT3&bGzt*OzM2')
+
+                # Encrypt the plaintext and get the associated ciphertext.
+                # GCM does not require padding.
+                
+                text = encryptor.update(data) + encryptor.finalize()
+
+                fp = open(obj.name, 'wb')
+                fp.write(text)
+                fp.close()
+
+            return (iv, encryptor.tag)
+
+        def decrypt_file(key, associated_data, iv, ciphertext, tag):
+            # Construct a Cipher object, with the key, iv, and additionally the
+            # GCM tag used for authenticating the message.
+            iv = b"E\x1f~\xa9*h\xef\xc7\xe2'\x8d\xd7Xm\xdd\x1e"
+            
+            decryptor = Cipher(
+                algorithms.AES(key),
+                modes.GCM(iv, tag),
+            ).decryptor()
+
+            # We put associated_data back in or the tag will fail to verify
+            # when we finalize the decryptor.
+            # decryptor.authenticate_additional_data(associated_data)
+            decryptor.authenticate_additional_data(b'9PjDQfxXT3&bGzt*OzM2')
+            
+            # Decryption gets us the authenticated plaintext.
+            # If the tag does not match an InvalidTag exception will be raised.
+            return decryptor.update(ciphertext) + decryptor.finalize()
+
+        iv, ciphertext, tag = encrypt(
+            key,
+            b"a secret message!",
+            b"authenticated but not encrypted payload"
+        )
+
+        print(decrypt(
+            key,
+            b"authenticated but not encrypted payload",
+            iv,
+            ciphertext,
+            tag
+        ))
             
             
     # Send the list of media files to clients
@@ -188,6 +267,29 @@ class MediaServer(resource.Resource):
                 },indent=4
             ).encode('latin')
 
+    def check_user_licences(self, session_id, media_id, request):
+        logger.debug(f'Checking licence for media id: {media_id}')
+        
+        client_cert = self.sessions[session_id][Session.CERT]
+        licences = self.users[client_cert][User.LICENCES]
+
+        if media_id in licences:
+            # check time validity of certificate here
+            # validate(licences[media_id])
+            now = datetime.datetime.now()
+            
+            if licences[media_id].not_valid_after < now:
+                logger.debug("Licence Invalid.")
+                return False
+
+            logger.debug("Successfully validated client's licence")
+            return True
+        else:
+            logger.debug('Client has no licence for this media.')
+            return False
+    
+        
+        
     # Send a media chunk to the client
     def do_download(self, session_id, media_id, chunk_id, request):
         
@@ -297,6 +399,11 @@ class MediaServer(resource.Resource):
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                 return json.dumps({'error': 'unauthorized'}).encode('latin')
             
+            if data['chunk_id'] == 0 and not self.check_user_licences(session_id, data['media_id'], request):
+                request.setResponseCode(401)
+                request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                return json.dumps({'error': 'unauthorized'}).encode('latin')
+            
             return self.do_download(session_id, data['media_id'], data['chunk_id'], request)
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
         return json.dumps({'error': 'invalid request'}, indent=4).encode('latin')
@@ -325,53 +432,121 @@ class MediaServer(resource.Resource):
             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
             return json.dumps({'error': "something wen't wrong"}).encode('latin')
         
-        # Decrypt Data
-        data = json.loads(self.decrypt_data(session_id, derived_key, iv, data, nonce))
 
-        method = data['method']
-        
-        if method == 'CONFIRM':
-            if session[Session.STATE] != State.KEY_EXCHANGE:
-                request.setResponseCode(401)
+        try:
+            # Decrypt Data
+            data = json.loads(self.decrypt_data(session_id, derived_key, iv, data, nonce))
+            method = data['method']
+            if method == 'CONFIRM':
+                if session[Session.STATE] != State.KEY_EXCHANGE:
+                    request.setResponseCode(401)
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'Unauthorized'}).encode('latin')
+                
+                session[Session.STATE] = State.CONFIRM
+                
+                algorithms = data['algorithms']
+            
+                ciphers = algorithms['ciphers']
+                digests = algorithms['digests']
+                ciphermodes = algorithms['ciphermodes']
+                choosen_cipher = algorithms['chosen_cipher']
+                choosen_digest = algorithms['chosen_digest']
+                choosen_mode = algorithms['chosen_mode']
+                
+                cipher, digest, ciphermode = self.choose_algorithms(ciphers, digests, ciphermodes)
+                
+                if cipher != choosen_cipher or digest != choosen_digest or ciphermode != choosen_mode:
+                    logger.debug("Algorithms did not match server's preferred choices.")
+                    request.setResponseCode(404)
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': "something wen't wrong."}).encode('latin')
+                
+                session[Session.STATE] = State.ALLOW
+                logger.debug("Confirmed session ID " + str(session_id) + " algorithms and is now allowed to communicate.")
+                
+                
+                derived_key, hmac_key, salt = self.gen_derived_key(session_id)
+                data = json.dumps({'methods': {'GET': [{'/api': ['PROTOCOL', 'LIST', 'DOWNLOAD']}, '/api/cert'], 'POST': [{'/api/': ['CONFIRM', 'LICENCE']}, '/api/hello', '/api/key_exchange']}}).encode('latin')
+
+                data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
+                data = self.gen_MAC(session_id, hmac_key, data)
+
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                return json.dumps({'error': 'Unauthorized'}).encode('latin')
-            
-            session[Session.STATE] = State.CONFIRM
-            
-            algorithms = data['algorithms']
-        
-            ciphers = algorithms['ciphers']
-            digests = algorithms['digests']
-            ciphermodes = algorithms['ciphermodes']
-            choosen_cipher = algorithms['chosen_cipher']
-            choosen_digest = algorithms['chosen_digest']
-            choosen_mode = algorithms['chosen_mode']
-            
-            cipher, digest, ciphermode = self.choose_algorithms(ciphers, digests, ciphermodes)
-            
-            if cipher != choosen_cipher or digest != choosen_digest or ciphermode != choosen_mode:
-                logger.debug("Algorithms did not match server's preferred choices.")
-                request.setResponseCode(404)
+                return json.dumps({
+                    'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+                    'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+                    'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
+                    'data': binascii.b2a_base64(data).decode('latin').strip(),
+                }).encode('latin')
+            elif method == 'LICENCE':
+                if session[Session.STATE] != State.ALLOW:
+                    request.setResponseCode(401)
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'Unauthorized'}).encode('latin')
+
+                # Create licence for this user of this media  
+                media_id = data['media_id']
+                
+                # Generate our key
+                key = rsa.generate_private_key(
+                    public_exponent=65537,
+                    key_size=2048,
+                )
+
+                # Various details about who we are. For a self-signed certificate the
+                # subject and issuer are always the same.
+                subject = issuer = x509.Name([
+                    x509.NameAttribute(NameOID.COUNTRY_NAME, u"PT"),
+                    x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"Aveiro"),
+                    x509.NameAttribute(NameOID.LOCALITY_NAME, u"Aveiro"),
+                    x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"UA"),
+                    x509.NameAttribute(NameOID.COMMON_NAME, u"localhost"),
+                ])
+                licence = x509.CertificateBuilder().subject_name(
+                    subject
+                ).issuer_name(
+                    issuer
+                ).public_key(
+                    key.public_key()
+                ).serial_number(
+                    x509.random_serial_number()
+                ).not_valid_before(
+                    datetime.datetime.utcnow()
+                ).not_valid_after(
+                    # Our certificate will be valid for 60 seconds
+                    datetime.datetime.utcnow() + datetime.timedelta(seconds=10)
+                ).sign(key, hashes.SHA256())
+
+                # Store licence in users dict
+                self.users[session[Session.CERT]][User.LICENCES][media_id] = licence
+                
+                # Return licence
+                licence_b = binascii.b2a_base64(licence.public_bytes(Encoding.PEM)).decode('latin').strip()
+                data = json.dumps({'licence': licence_b}).encode('latin')
+                
+                derived_key, hmac_key, salt = self.gen_derived_key(session_id)
+                data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
+                data = self.gen_MAC(session_id, hmac_key, data)
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                return json.dumps({'error': "something wen't wrong."}).encode('latin')
-            
-            session[Session.STATE] = State.ALLOW
-            logger.debug("Confirmed session ID " + str(session_id) + " algorithms and is now allowed to communicate.")
-            
-            
-            derived_key, hmac_key, salt = self.gen_derived_key(session_id)
-            data = json.dumps({'methods': {'GET': ['/api', '/api/cert'], 'POST': ['/api/']}}).encode('latin')
+                
+                logger.debug(f'Client bought a new licence for media id {media_id}')
+                
+                return json.dumps(
+                        {
+                            'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+                            'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+                            'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
+                            'data': binascii.b2a_base64(data).decode('latin').strip(),
+                        }).encode('latin')
+                
 
-            data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
-            data = self.gen_MAC(session_id, hmac_key, data)
-
-            request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-            return json.dumps({
-                'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-                'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-                'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
-                'data': binascii.b2a_base64(data).decode('latin').strip(),
-            }).encode('latin')
+        except Exception as e:
+            logger.exception(e)
+            request.setResponseCode(500)
+            request.responseHeaders.addRawHeader(b"content-type", b"text/plain")
+            return b''
+            
     
     # Handle a GET request
     def render_GET(self, request):
@@ -415,7 +590,9 @@ class MediaServer(resource.Resource):
                 logger.debug("Client's Certificate Validated.")
                 
                 if client_cert not in self.users:
-                    self.users[client_cert] = b''
+                    self.users[client_cert] = [0]*2
+                    self.users[client_cert][User.CC_TOKEN] = b''
+                    self.users[client_cert][User.LICENCES] = {}
                     logger.info('Registering client...')
                 
                 ciphers = data['ciphers']
@@ -463,19 +640,26 @@ class MediaServer(resource.Resource):
                     logger.debug('No 2-factor chosen.')
                 elif '1' in data['choice']:
                     logger.debug('CC Token chosen for 2-factor authentication.')
-                    if self.users[session[Session.CERT]] != b'':
+                    if self.users[session[Session.CERT]][User.CC_TOKEN] != b'':
                         # validate cc_token
-                        if not self.ca.validate_cert(binascii.a2b_base64(data['choice']['1'])):
+                        
+                        # Only check if it's equal because couldn't find the key on the
+                        # PKCS11 program to sign a nounce and verify it here
+                        client_cc_cert = x509.load_pem_x509_certificate(binascii.a2b_base64(data['choice']['1']))
+                        if (not self.ca.validate_cert(client_cc_cert)
+                            or self.users[session[Session.CERT]][User.CC_TOKEN] != client_cc_cert):
                             logger.debug("Client's Certificate Invalid.")
                             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                             return json.dumps({'error': 'certificate invalid'}, indent=4).encode('latin')
+                            
                         logger.debug("Client's Certificate Validated.")
                     else:
-                        if not self.ca.validate_cert(x509.load_pem_x509_certificate(binascii.a2b_base64(data['choice']['1']))):
+                        client_cc_cert = x509.load_pem_x509_certificate(binascii.a2b_base64(data['choice']['1']))
+                        if not self.ca.validate_cert(client_cc_cert):
                             logger.debug("Client's Certificate Invalid.")
                             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                             return json.dumps({'error': 'certificate invalid'}, indent=4).encode('latin')
-                        self.users[session[Session.CERT]] = data['choice']['1']
+                        self.users[session[Session.CERT]][User.CC_TOKEN] = client_cc_cert
                         logger.debug('Sucessfully added 2-factor to this user.')
                     pass
                 
