@@ -145,7 +145,7 @@ class CA:
         return self.validate_chain(chain[1:])
 
 
-    def validate_cert_signature(cert, issuer_cert):
+    def validate_cert_signature(self, cert, issuer_cert):
         """Verify if the certificate signature belongs to the issuer."""
         
         cert_signature = cert.signature

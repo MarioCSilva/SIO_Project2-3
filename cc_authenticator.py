@@ -31,10 +31,10 @@ class CC_Authenticator():
 
                 self.attr_list[attr['CKA_LABEL']] = attr
                 
-                print(attr['CKA_LABEL'])
+                print(attr)
                 if attr['CKA_LABEL'] == 'CITIZEN AUTHENTICATION CERTIFICATE':
                     self.cert = x509.load_der_x509_certificate(bytes(self.attr_list['CITIZEN AUTHENTICATION CERTIFICATE']['CKA_VALUE']), default_backend())
-                    break    
+                    break     
                 
                 
                 

@@ -551,12 +551,20 @@ def main():
     # Get data from server and send it to the ffplay stdin through a pipe
     for chunk in range(media_item['chunks'] + 1):
         
-        data = json.dumps({
-            'method': 'DOWNLOAD',
-            'media_id': media_item["id"],
-            'chunk_id': chunk,
-            'licence': self.licences.get(media_item["id"])
-        }).encode('latin')
+        # on the first chunk send licence for this media
+        if chunk == 0:
+            data = json.dumps({
+                'method': 'DOWNLOAD',
+                'media_id': media_item["id"],
+                'chunk_id': chunk,
+                'licence': client.licences.get(media_item["id"]) if client.licences.get(media_item["id"]) else binascii.b2a_base64(b'').decode('latin').strip()
+            }).encode('latin')
+        else:
+            data = json.dumps({
+                'method': 'DOWNLOAD',
+                'media_id': media_item["id"],
+                'chunk_id': chunk,
+            }).encode('latin')
 
         derived_key, hmac_key, salt = client.gen_derived_key()
         data, iv, nonce = client.encrypt_data(derived_key, data)
@@ -619,16 +627,15 @@ def main():
             
             # Decrypt Data
             data = json.loads(client.decrypt_data(derived_key, iv, data, nonce))
-            licence = x509.load_pem_x509_certificate(binascii.a2b_base64(data['licence'].encode('latin')))
+            licence = binascii.a2b_base64(data['licence'].encode('latin'))
             
-            self.licences[media_item["id"]] = licence
-            logger.debug(licence)
+            client.licences[media_item["id"]] = licence
             
             data = json.dumps({
                 'method': 'DOWNLOAD',
                 'media_id': media_item["id"],
                 'chunk_id': chunk,
-                'licence': self.licences.get(media_item["id"])
+                'licence': binascii.b2a_base64(client.licences.get(media_item["id"])).decode('latin').strip()
             }).encode('latin')
 
             derived_key, hmac_key, salt = client.gen_derived_key()
