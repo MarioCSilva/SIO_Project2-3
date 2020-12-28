@@ -105,6 +105,7 @@ class CA:
         if issuer == subject and subject in self.ca_roots:
             return chain
         # check if the issuer is in the trusted certificates
+        logger.debug(issuer)
         if issuer in self.ca_roots:
             return self.get_chain(self.ca_roots[issuer], chain)
         elif issuer in self.ca_intermediate:

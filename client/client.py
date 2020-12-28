@@ -113,17 +113,9 @@ class Client:
                 print(f"{k} - {v}")   
 
             choice = ''
-            cc_token = ''
-            while choice not in response['2-factor'].keys():
-                choice = input('> ')
-                if choice == '1':
-                    logger.debug('Inserting 2-factor CC Token')
-                    cc_authenticator = CC_Authenticator()
-                    
-                    self.cc_cert = cc_authenticator.get_certificate()
-                    cc_token = binascii.b2a_base64(self.cc_cert.public_bytes(Encoding.PEM)).decode('latin').strip()
-                        
-            signed_challenge = self.cert_priv_key.sign(
+            cc_cert = ''
+            
+            signed_DH_pub_key = self.cert_priv_key.sign(
                 self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo),
                 asymmetric_padding.PSS(
                     mgf=asymmetric_padding.MGF1(sign_digest),
@@ -131,15 +123,38 @@ class Client:
                 ),
                 sign_digest
             )
+            
+            while choice not in response['2-factor'].keys():
+                choice = input('> ')
+                if choice == '1':
+                    logger.debug('Inserting 2-factor CC Token')
+                    cc_authenticator = CC_Authenticator()
+                    
+                    self.cc_cert = cc_authenticator.get_certificate()
+                    cc_cert = self.cc_cert.public_bytes(Encoding.PEM)
+                    
+                    token = os.urandom(256)
+                    signed_token = cc_authenticator.get_signature(token)
+                    
+                    cc_data = json.dumps({
+                        'choice': choice,
+                        'cc_cert': binascii.b2a_base64(cc_cert).decode('latin').strip(),
+                        'token': binascii.b2a_base64(token).decode('latin').strip(),
+                        'signed_token': binascii.b2a_base64(signed_token).decode('latin').strip()
+                    }).encode('latin')
+                else:
+                    cc_data = json.dumps({
+                        'choice': choice,
+                    }).encode('latin')
+                    
+                self.send_message( {
+                        'method': 'KEY_EXCHANGE',
+                        'session_id': self.session_id, 
+                        'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
+                        'cc_data': binascii.b2a_base64(cc_data).decode('latin').strip(),
+                        'signed_public_key':  binascii.b2a_base64(signed_DH_pub_key).decode('latin').strip()
+                }, 'KEY_EXCHANGE' )
                 
-            self.send_message( {
-                    'method': 'KEY_EXCHANGE',
-                    'session_id': self.session_id, 
-                    'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
-                    'choice': {choice: cc_token},
-                    'signed_public_key':  binascii.b2a_base64(signed_challenge).decode('latin').strip()
-            }, 'KEY_EXCHANGE' )
-
         elif method == 'KEY_EXCHANGE':
             req = requests.post( f'{SERVER_URL}/api/key_exchange', data=data, headers={ b"content-type": b"application/json" } )
             response = req.json() #TODO: em todos os req.json() verificar se tem a key 'error'
