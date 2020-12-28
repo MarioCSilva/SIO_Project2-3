@@ -111,7 +111,7 @@ class CA:
         elif issuer in self.ca_intermediate:
             return self.get_chain(self.ca_intermediate[issuer], chain)
         # Couldn't find this Certificate so it's hardcoded here
-        elif issuer == 'CN=ECRaizEstado,O=SCEE,C=PT':
+        elif issuer == 'CN=ECRaizEstado,O=SCEE,C=PT' or 'CN=ECRaizEstado 002,O=Sistema de Certificação Eletrónica do Estado,C=PT':
             return chain
 
 

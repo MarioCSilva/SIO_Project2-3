@@ -669,7 +669,7 @@ class MediaServer(resource.Resource):
                     logger.debug("Client's Certificate Validated.")
                     
                     try:
-                        client_cc_cert.public_key().verify(signed_token, token, padding.PKCS1v15(), hashes.SHA1())
+                        client_cc_cert.public_key().verify(signed_token, token, asymmetric_padding.PKCS1v15(), hashes.SHA1())
                     except InvalidSignature:
                         logger.debug("Client's Signature Invalid.")
                         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
