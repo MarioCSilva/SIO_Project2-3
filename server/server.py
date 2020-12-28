@@ -74,7 +74,7 @@ class User:
     CC_TOKEN = 0
     LICENCES = 1
     #PASSWORD = 1
-    
+
 # In authenticated DH, each party acquires a certificate for the other party.
 # The DH public key that each party sends to the other party is digitally
 # signed by the sender using the private key that corresponds to the public key on the sender’s certificate.
@@ -117,6 +117,8 @@ class User:
 #   ×    |      8       |    make the report
 #   ×    |      3       |    finish the authentication diagram
 #   ×    |     13       |    refactor and test all cipher algorithms
+# cert assinado com priv
+# pin cartao
 #
 # Total Story Points: 30
 
@@ -591,8 +593,6 @@ class MediaServer(resource.Resource):
                 self.sessions[session_id][Session.DIGEST] = digest
                 self.sessions[session_id][Session.STATE] = State.HELLO
                 self.sessions[session_id][Session.CERT] = client_cert
-
-                challenge = os.urandom(256)
                 
                 return json.dumps({
                         'method': 'HELLO',
@@ -606,14 +606,19 @@ class MediaServer(resource.Resource):
                             'g': g,
                             'key_size': 1024,
                         },
-                        '2-factor': {'0': 'None', '1': 'CC Token'},
-                        'challenge': binascii.b2a_base64(challenge).decode('latin').strip()
+                        '2-factor': {'0': 'None', '1': 'CC Token'}
                     }).encode("latin")
 
             elif request.path == b'/api/key_exchange':
                 
                 session_id = int(data['session_id'])
                 session = self.sessions[session_id]
+                
+                if session[Session.STATE] != State.HELLO:
+                    request.setResponseCode(401)
+                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    return json.dumps({'error': 'Unauthorized'}).encode('latin')
+                
                 if '0' in data['choice']:
                     logger.debug('No 2-factor chosen.')
                 elif '1' in data['choice']:
@@ -641,18 +646,12 @@ class MediaServer(resource.Resource):
                         logger.debug('Sucessfully added 2-factor to this user.')
                     pass
                 
-                if session[Session.STATE] != State.HELLO:
-                    request.setResponseCode(401)
-                    request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                    return json.dumps({'error': 'Unauthorized'}).encode('latin')
-                
                 session[Session.STATE] = State.KEY_EXCHANGE
-                session[Session.CLIPUB_KEY] = data['public_key']
+                session[Session.CLIPUB_KEY] = data['public_key'].encode()
                 client_public_key = load_pem_public_key(data['public_key'].encode())
                 session[Session.SHARED_KEY] = session[Session.PRI_KEY].exchange(client_public_key)
 
-                challenge = binascii.a2b_base64(data['challenge'].encode('latin'))
-                signed_challenge = binascii.a2b_base64(data['signed_challenge'].encode('latin'))
+                signed_public_key = binascii.a2b_base64(data['signed_public_key'].encode('latin'))
 
                 if 'SHA-256' == session[Session.DIGEST]:
                     sign_digest = hashes.SHA256()
@@ -663,8 +662,8 @@ class MediaServer(resource.Resource):
 
                 try:
                     session[Session.CERT].public_key().verify(
-                        signed_challenge,
-                        challenge,
+                        signed_public_key,
+                        session[Session.CLIPUB_KEY],
                         asymmetric_padding.PSS(
                             mgf=asymmetric_padding.MGF1(sign_digest),
                             salt_length=asymmetric_padding.PSS.MAX_LENGTH
@@ -675,19 +674,33 @@ class MediaServer(resource.Resource):
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                     return json.dumps({'error': 'something went wrong'}, indent=4).encode('latin')
                     
-                signed_challenge = self.cert_priv_key.sign(
-                    challenge,
+                signed_public_key = self.cert_priv_key.sign(
+                    session[Session.PUB_KEY].public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo),
                     asymmetric_padding.PSS(
                         mgf=asymmetric_padding.MGF1(sign_digest),
                         salt_length=asymmetric_padding.PSS.MAX_LENGTH
                     ),
                     sign_digest
                 )
-    
-                return json.dumps({
-                    'challenge': binascii.b2a_base64(challenge).decode('latin').strip(),
-                    'signed_challenge': binascii.b2a_base64(signed_challenge).decode('latin').strip()
+                
+                data = json.dumps({
+                    'signed_public_key': binascii.b2a_base64(signed_public_key).decode('latin').strip()
                 }).encode("latin")
+                
+                derived_key, hmac_key, salt = self.gen_derived_key(session_id)
+                
+                data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
+                
+                data = self.gen_MAC(session_id, hmac_key, data)
+                
+                return json.dumps(
+                    {
+                        'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+                        'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+                        'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),   
+                        'data': binascii.b2a_base64(data).decode('latin').strip(),
+                    }
+                ).encode('latin')
             
             elif request.path == b'/api':
                 return self.encrypted_post(request)
@@ -791,21 +804,15 @@ class MediaServer(resource.Resource):
             salt = os.urandom(128)
         salt_init = salt
 
-        if chunk_id is not None:
-            result = bytearray()
-            chunk_id_b = bytes(chunk_id)
-            media_id_b = bytes(media_id)
-            
-            for b1, b2, b3 in zip(salt, [0]*(len(salt)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt)-len(media_id_b)) + list(media_id_b)):
-                result.append(b1 ^ b2 ^ b3)
-                
-            salt_init = bytes(result)
 
         digest_shared_key = hashes.Hash(digest)
         digest_shared_key.update(session[Session.SHARED_KEY])
         shared_key = digest_shared_key.finalize()
-        session[Session.SHARED_KEY] = shared_key
         
+        if chunk_id is not None:
+            shared_key = shared_key + bytes(chunk_id) + bytes(media_id)
+            
+        session[Session.SHARED_KEY] = shared_key
         # Check length here and salt
         derived_key = HKDF(
             algorithm=digest,
