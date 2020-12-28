@@ -143,3 +143,22 @@ class CA:
                 return False
 
         return self.validate_chain(chain[1:])
+
+
+    def validate_cert_signature(cert, issuer_cert):
+        """Verify if the certificate signature belongs to the issuer."""
+        
+        cert_signature = cert.signature
+        issuer_public_key = issuer_cert.public_key()
+
+        try:
+            issuer_public_key.verify(
+                cert_signature,
+                cert.tbs_certificate_bytes,
+                padding.PKCS1v15(),
+                cert.signature_hash_algorithm,
+            )
+        except:
+            return False
+
+        return True

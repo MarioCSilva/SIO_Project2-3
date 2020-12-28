@@ -48,7 +48,7 @@ class Client:
         self.ciphers = ['AES', '3DES', 'ChaCha20']
         self.digests = ['SHA-256','SHA-512']
         self.ciphermodes = ['CBC','ECB']
-        self.server_public_key = None
+        self.server_dh_pubkey = None
         self.cipher = None
         self.digest = None
         self.ciphermode = None
@@ -84,8 +84,6 @@ class Client:
                 logger.debug("Restarting communications")
                 self.negotiate()
 
-            challenge = binascii.a2b_base64(response['challenge'].encode('latin'))
-
             self.cipher = response['cipher']
             self.ciphermode = response['ciphermode']
             self.digest = response['digest']
@@ -98,16 +96,8 @@ class Client:
             elif 'SHA-512' == self.digest:
                 sign_digest = hashes.SHA512()
 
-            signed_challenge = self.cert_priv_key.sign(
-                challenge,
-                asymmetric_padding.PSS(
-                    mgf=asymmetric_padding.MGF1(sign_digest),
-                    salt_length=asymmetric_padding.PSS.MAX_LENGTH
-                ),
-                sign_digest
-            )
 
-            self.server_public_key = response['public_key']
+            self.server_dh_pubkey = response['public_key'].encode()
 
             p, g, key_size = response['parameters']['p'],\
                              response['parameters']['g'],\
@@ -130,22 +120,41 @@ class Client:
                     
                     self.cc_cert = cc_authenticator.get_certificate()
                     cc_token = binascii.b2a_base64(self.cc_cert.public_bytes(Encoding.PEM)).decode('latin').strip()
+                        
+            signed_challenge = self.cert_priv_key.sign(
+                self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo),
+                asymmetric_padding.PSS(
+                    mgf=asymmetric_padding.MGF1(sign_digest),
+                    salt_length=asymmetric_padding.PSS.MAX_LENGTH
+                ),
+                sign_digest
+            )
                 
             self.send_message( {
                     'method': 'KEY_EXCHANGE',
                     'session_id': self.session_id, 
                     'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
-                    'challenge': binascii.b2a_base64(challenge).decode('latin').strip(),
                     'choice': {choice: cc_token},
-                    'signed_challenge':  binascii.b2a_base64(signed_challenge).decode('latin').strip()
+                    'signed_public_key':  binascii.b2a_base64(signed_challenge).decode('latin').strip()
             }, 'KEY_EXCHANGE' )
 
         elif method == 'KEY_EXCHANGE':
             req = requests.post( f'{SERVER_URL}/api/key_exchange', data=data, headers={ b"content-type": b"application/json" } )
             response = req.json() #TODO: em todos os req.json() verificar se tem a key 'error'
             
-            challenge = binascii.a2b_base64(response['challenge'].encode('latin'))
-            signed_challenge = binascii.a2b_base64(response['signed_challenge'].encode('latin'))
+            iv = binascii.a2b_base64(response['iv'].encode('latin'))
+            salt = binascii.a2b_base64(response['salt'].encode('latin'))
+            data = binascii.a2b_base64(response['data'].encode('latin'))
+            nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
+            
+            derived_key, hmac_key, _ = self.gen_derived_key(salt=salt)
+            data = self.verify_MAC(hmac_key, data)
+            if not data:
+                logger.debug("Integrity or authenticity compromised.")
+                exit()
+            data = json.loads(self.decrypt_data(derived_key, iv, data, nonce))
+            
+            signed_public_key = binascii.a2b_base64(data['signed_public_key'].encode('latin'))
             
             if 'SHA-256' == self.digest:
                 sign_digest = hashes.SHA256()
@@ -156,8 +165,8 @@ class Client:
                 
             try:
                 self.server_cert.public_key().verify(
-                    signed_challenge,
-                    challenge,
+                    signed_public_key,
+                    self.server_dh_pubkey,
                     asymmetric_padding.PSS(
                         mgf=asymmetric_padding.MGF1(sign_digest),
                         salt_length=asymmetric_padding.PSS.MAX_LENGTH
@@ -287,7 +296,7 @@ class Client:
         elif self.digest == 'SHA-512':
             digest = hashes.SHA512()
 
-        server_public_key = load_pem_public_key(self.server_public_key.encode())
+        server_public_key = load_pem_public_key(self.server_dh_pubkey)
 
         self.shared_key = self.private_key.exchange(server_public_key)
         
@@ -422,21 +431,23 @@ class Client:
             salt = os.urandom(128)
         salt_init = salt
 
-        if chunk_id is not None:
-            result = bytearray()
-            chunk_id_b = bytes(chunk_id)
-            media_id_b = bytes(media_id)
-
-            for b1, b2, b3 in zip(salt, [0]*(len(salt)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt)-len(media_id_b)) + list(media_id_b)):
-                result.append(b1 ^ b2 ^ b3)
-
-            salt_init = bytes(result)
 
         digest_shared_key = hashes.Hash(digest)
         digest_shared_key.update(self.shared_key)
         shared_key = digest_shared_key.finalize()
-        self.shared_key = shared_key
 
+        if chunk_id is not None:
+            shared_key = shared_key + bytes(chunk_id) + bytes(media_id)
+            # result = bytearray()
+            # chunk_id_b = bytes(chunk_id)
+            # media_id_b = bytes(media_id)
+
+            # for b1, b2, b3 in zip(salt, [0]*(len(salt)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt)-len(media_id_b)) + list(media_id_b)):
+            #     result.append(b1 ^ b2 ^ b3)
+
+            # salt_init = bytes(result)
+            
+        self.shared_key = shared_key
         # Check length here and salt
         derived_key = HKDF(
             algorithm = digest,
