@@ -26,6 +26,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from certificate_authority import CA
 from cc_authenticator import CC_Authenticator
 
+from collections import defaultdict 
 
 from cryptography.exceptions import InvalidSignature
 
@@ -53,6 +54,7 @@ class Client:
         self.digest = None
         self.ciphermode = None
         self.session_id = None
+        self.licences = defaultdict()
 
         self.ca = CA('./crl')
         
@@ -541,7 +543,8 @@ def main():
         data = json.dumps({
             'method': 'DOWNLOAD',
             'media_id': media_item["id"],
-            'chunk_id': chunk
+            'chunk_id': chunk,
+            'licence': self.licences.get(media_item["id"])
         }).encode('latin')
 
         derived_key, hmac_key, salt = client.gen_derived_key()
@@ -606,13 +609,15 @@ def main():
             # Decrypt Data
             data = json.loads(client.decrypt_data(derived_key, iv, data, nonce))
             licence = x509.load_pem_x509_certificate(binascii.a2b_base64(data['licence'].encode('latin')))
-    
+            
+            self.licences[media_item["id"]] = licence
             logger.debug(licence)
             
             data = json.dumps({
                 'method': 'DOWNLOAD',
                 'media_id': media_item["id"],
-                'chunk_id': chunk
+                'chunk_id': chunk,
+                'licence': self.licences.get(media_item["id"])
             }).encode('latin')
 
             derived_key, hmac_key, salt = client.gen_derived_key()

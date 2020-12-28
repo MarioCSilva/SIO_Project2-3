@@ -29,11 +29,13 @@ class CC_Authenticator():
 
                 attr = dict(zip(map(PyKCS11.CKA.get, self.all_attr), attr))
 
-                #print('Label:', attr['CKA_LABEL'])
                 self.attr_list[attr['CKA_LABEL']] = attr
-                if attr['CKA_LABEL']=='CITIZEN AUTHENTICATION CERTIFICATE':
+                
+                print(attr['CKA_LABEL'])
+                if attr['CKA_LABEL'] == 'CITIZEN AUTHENTICATION CERTIFICATE':
                     self.cert = x509.load_der_x509_certificate(bytes(self.attr_list['CITIZEN AUTHENTICATION CERTIFICATE']['CKA_VALUE']), default_backend())
-                    break
+                    break    
+                
                 
                 
     def get_certificate(self):

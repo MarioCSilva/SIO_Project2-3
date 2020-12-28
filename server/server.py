@@ -241,11 +241,17 @@ class MediaServer(resource.Resource):
                 },indent=4
             ).encode('latin')
 
-    def check_user_licences(self, session_id, media_id, request):
+    def check_user_licences(self, session_id, media_id, licence):
         logger.debug(f'Checking licence for media id: {media_id}')
         
         client_cert = self.sessions[session_id][Session.CERT]
         licences = self.users[client_cert][User.LICENCES]
+
+        if licence is None:
+            logger.debug('Client has no licence for this media.')
+            return False
+        
+        licence
 
         if media_id in licences:
             # check time validity of certificate here
@@ -261,7 +267,6 @@ class MediaServer(resource.Resource):
         else:
             logger.debug('Client has no licence for this media.')
             return False
-    
         
         
     # Send a media chunk to the client
@@ -375,7 +380,7 @@ class MediaServer(resource.Resource):
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                 return json.dumps({'error': 'unauthorized'}).encode('latin')
             
-            if data['chunk_id'] == 0 and not self.check_user_licences(session_id, data['media_id'], request):
+            if data['chunk_id'] == 0 and not self.check_user_licences(session_id, data['media_id'], data['licence']):
                 request.setResponseCode(401)
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                 return json.dumps({'error': 'unauthorized'}).encode('latin')
@@ -465,10 +470,7 @@ class MediaServer(resource.Resource):
                 media_id = data['media_id']
                 
                 # Generate our key
-                key = rsa.generate_private_key(
-                    public_exponent=65537,
-                    key_size=2048,
-                )
+                key = self.cert_priv_key
 
                 # Various details about who we are. For a self-signed certificate the
                 # subject and issuer are always the same.
