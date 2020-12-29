@@ -46,7 +46,7 @@ class Client:
         """Representation of the client."""
 
         self.ciphers = ['AES', '3DES', 'ChaCha20']
-        self.digests = ['SHA-256','SHA-512']
+        self.digests = ['SHA-256','SHA-384','SHA-512']
         self.ciphermodes = ['CBC','ECB']
         self.server_dh_pubkey = None
         self.cipher = None
@@ -157,7 +157,9 @@ class Client:
         # State CONFIRM
         response = self.send_message( data, 'CONFIRM')
         
-        data = self.handle_confirm(response)
+        if self.handle_error(response):
+            logger.warning("Restarting communications.")
+            self.negotiate()
         
         data = self.decrypt_response(response)
         
@@ -251,12 +253,6 @@ class Client:
                 'chosen_mode': self.ciphermode
             },
         }).encode('latin')
-
-
-    def handle_confirm(self, response):
-        if self.handle_error(response):
-            logger.warning("Restarting communications.")
-            self.negotiate()
 
         
     def handle_error(self, response):
@@ -379,7 +375,7 @@ class Client:
 
 
     def decrypt_response(self, response, media_id=None, chunk_id=None):
-        """Validate the response integrity and then encrypt the response.
+        """Validate the response integrity and then decrypt the response.
         
         The parameters ``media_id`` and ``chunk_id`` are used during
         chunk based key rotation.

@@ -86,7 +86,6 @@ class User:
 # creates a shared secret without any transmission of the secret between the two parties.
 
 
-
 # State 0:
 #     Cliente manda Hello:
 #         Server responde com Hello
@@ -222,12 +221,6 @@ class MediaServer(resource.Resource):
                         
     # Send the list of media files to clients
     def do_list(self, session_id, request):
-
-        #auth = request.getHeader('Authorization')
-        #if not auth:
-        #    request.setResponseCode(401)
-        #    return 'Not authorized'
-
         # Build list
         media_list = []
         for media_id in CATALOG:
@@ -239,25 +232,12 @@ class MediaServer(resource.Resource):
                 'chunks': math.ceil(media['file_size'] / CHUNK_SIZE),
                 'duration': media['duration']
                 })
-
-        derived_key, hmac_key, salt = self.gen_derived_key(session_id)
-
+            
         data = json.dumps(media_list, indent=4).encode('latin')
         
-        data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
-
-        data = self.gen_MAC(session_id, hmac_key, data)
-
-        # Return list to client
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-        return json.dumps(
-                {
-                    'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-                    'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-                    'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
-                    'data': binascii.b2a_base64(data).decode('latin').strip(),
-                },indent=4
-            ).encode('latin')
+        return self.encrypt_request(session_id, data)
+
         
     def check_user_licences(self, session_id, media_id, licence):
         logger.debug(f'Checking licence for media id: {media_id}')
@@ -344,24 +324,9 @@ class MediaServer(resource.Resource):
             data = json.dumps({
                 'chunk': binascii.b2a_base64(CATALOG[media_id]['data'][offset : offset+CHUNK_SIZE]).decode('latin').strip()
             }).encode('latin')
-            
-            derived_key, hmac_key, salt = self.gen_derived_key(session_id, media_id.encode('latin'), str(chunk_id).encode('latin'))
-
-            data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
-
-            data = self.gen_MAC(session_id, hmac_key, data)
 
             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-            return json.dumps(
-                    {
-                        'media_id': media_id,
-                        'chunk_id': chunk_id,
-                        'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-                        'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-                        'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
-                        'data': binascii.b2a_base64(data).decode('latin').strip(),
-                    },indent=4
-                ).encode('latin')
+            return self.encrypt_request(session_id, data, media_id.encode('latin'), str(chunk_id).encode('latin'))
 
         # File was not open?
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
@@ -373,80 +338,55 @@ class MediaServer(resource.Resource):
 
         data = json.loads(request.getHeader('Content'))
         
-        salt = binascii.a2b_base64(data['salt'].encode('latin'))
-        iv = binascii.a2b_base64(data['iv'].encode('latin'))
-        nonce = binascii.a2b_base64(data['nonce'].encode('latin'))
+        data = self.decrypt_response(session_id, data)
         
-        content = binascii.a2b_base64(data['data'].encode('latin'))
-        
-        
-        derived_key, hmac_key, _ = self.gen_derived_key(session_id, salt=salt)
-        data = self.verify_MAC(session_id, hmac_key, content)
-
-        if not data:
-            logger.debug("Integrity or authenticity compromised.")
+        if 'error' in data:
             request.setResponseCode(404)
             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-            return json.dumps({'error': 'unknown'}, indent=4).encode('latin')
-        
-        
-        data = json.loads(self.decrypt_data(session_id, derived_key, iv, data, nonce))
-
+            return json.dumps(data).encode('latin')
+            
         method = data['method']
-        
-        if method == 'PROTOCOL':
-            return self.do_get_protocols(request)
-        elif method == 'LIST':
+
+        if method == 'LIST':
             if session_id in self.sessions and self.sessions[session_id][Session.STATE] != State.ALLOW:
                 request.setResponseCode(401)
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                 return json.dumps({'error': 'unauthorized'}).encode('latin')
-                
             return self.do_list(session_id, request)
+            
         elif method == 'DOWNLOAD':
             if session_id in self.sessions and self.sessions[session_id][Session.STATE] != State.ALLOW:
                 request.setResponseCode(401)
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                 return json.dumps({'error': 'unauthorized'}).encode('latin')
-            
+
+            # On the first chunk check if the licence that the client sent is valid
             if data['chunk_id'] == 0 and not self.check_user_licences(session_id, data['media_id'], binascii.a2b_base64(data['licence'].encode('latin'))):
                 request.setResponseCode(401)
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                 return json.dumps({'error': 'unauthorized'}).encode('latin')
-            
             return self.do_download(session_id, data['media_id'], data['chunk_id'], request)
+
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
         return json.dumps({'error': 'invalid request'}, indent=4).encode('latin')
 
 
     def encrypted_post(self, request):
-        data = json.loads(request.content.getvalue())
         
         session_id = int(request.getHeader('Authorization'))
         session = self.sessions[session_id]
 
-        salt = binascii.a2b_base64(data['salt'].encode('latin'))
-        iv = binascii.a2b_base64(data['iv'].encode('latin'))
-        nonce = binascii.a2b_base64(data['nonce'].encode('latin'))
+        data = json.loads(request.content.getvalue())
+        data = self.decrypt_response(session_id, data)
         
-        content = binascii.a2b_base64(data['data'].encode('latin'))
-        
-        derived_key, hmac_key, _ = self.gen_derived_key(session_id, salt=salt)
-            
-        data = self.verify_MAC(session_id, hmac_key, content)
-
-        # Verify MAC
-        if not data:
-            logger.debug("Integrity or authenticity compromised.")
+        if 'error' in data:
             request.setResponseCode(404)
             request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-            return json.dumps({'error': "something wen't wrong"}).encode('latin')
-        
+            return json.dumps(data).encode('latin')
 
+        method = data['method']
+        
         try:
-            # Decrypt Data
-            data = json.loads(self.decrypt_data(session_id, derived_key, iv, data, nonce))
-            method = data['method']
             if method == 'CONFIRM':
                 if session[Session.STATE] != State.KEY_EXCHANGE:
                     request.setResponseCode(401)
@@ -475,20 +415,11 @@ class MediaServer(resource.Resource):
                 session[Session.STATE] = State.ALLOW
                 logger.debug("Confirmed session ID " + str(session_id) + " algorithms and is now allowed to communicate.")
                 
-                
-                derived_key, hmac_key, salt = self.gen_derived_key(session_id)
-                data = json.dumps({'methods': {'GET': [{'/api': ['PROTOCOL', 'LIST', 'DOWNLOAD']}, '/api/cert'], 'POST': [{'/api/': ['CONFIRM', 'LICENCE']}, '/api/hello', '/api/key_exchange']}}).encode('latin')
-
-                data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
-                data = self.gen_MAC(session_id, hmac_key, data)
+                data = json.dumps({'methods': {'GET': [{'/api': ['LIST', 'DOWNLOAD']}, '/api/cert'], 'POST': [{'/api/': ['CONFIRM', 'LICENCE']}, '/api/hello', '/api/key_exchange']}}).encode('latin')
 
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                return json.dumps({
-                    'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-                    'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-                    'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
-                    'data': binascii.b2a_base64(data).decode('latin').strip(),
-                }).encode('latin')
+                return self.encrypt_request(session_id, data)
+                
             elif method == 'LICENCE':
                 if session[Session.STATE] != State.ALLOW:
                     request.setResponseCode(401)
@@ -535,21 +466,10 @@ class MediaServer(resource.Resource):
                 licence_b = binascii.b2a_base64(licence.public_bytes(Encoding.PEM)).decode('latin').strip()
                 data = json.dumps({'licence': licence_b}).encode('latin')
                 
-                derived_key, hmac_key, salt = self.gen_derived_key(session_id)
-                data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
-                data = self.gen_MAC(session_id, hmac_key, data)
-                request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                
                 logger.debug(f'Client bought a new licence for media id {media_id}')
                 
-                return json.dumps(
-                        {
-                            'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-                            'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-                            'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
-                            'data': binascii.b2a_base64(data).decode('latin').strip(),
-                        }).encode('latin')
-                
+                request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                return self.encrypt_request(session_id, data)
 
         except Exception as e:
             logger.exception(e)
@@ -583,7 +503,6 @@ class MediaServer(resource.Resource):
     # Handle a POST request
     def render_POST(self, request):
         logger.debug(f'Received POST for {request.uri}')
-        print(request.uri)
 
         try:
             data = json.loads(request.content.getvalue())
@@ -715,21 +634,8 @@ class MediaServer(resource.Resource):
                     'signed_public_key': binascii.b2a_base64(signed_public_key).decode('latin').strip()
                 }).encode("latin")
                 
-                derived_key, hmac_key, salt = self.gen_derived_key(session_id)
+                return self.encrypt_request(session_id, data)
                 
-                data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
-                
-                data = self.gen_MAC(session_id, hmac_key, data)
-                
-                return json.dumps(
-                    {
-                        'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-                        'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-                        'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),   
-                        'data': binascii.b2a_base64(data).decode('latin').strip(),
-                    }
-                ).encode('latin')
-            
             elif request.path == b'/api':
                 return self.encrypted_post(request)
 
@@ -806,7 +712,6 @@ class MediaServer(resource.Resource):
             return False
         
         mac_digest = hmac.HMAC(hmac_key, digest)
-
         mac_digest.update(data[:-digest.digest_size])
 
         try:
@@ -831,7 +736,6 @@ class MediaServer(resource.Resource):
         if salt is None:
             salt = os.urandom(128)
         salt_init = salt
-
 
         digest_shared_key = hashes.Hash(digest)
         digest_shared_key.update(session[Session.SHARED_KEY])
@@ -956,6 +860,48 @@ class MediaServer(resource.Resource):
             data = self.unpadder(algorithm.block_size, data)
         
         return data
+
+    def encrypt_request(self, session_id, data, media_id=None, chunk_id=None):
+        """Encrypt a request with integrity validation.
+        
+        The parameters ``media_id`` and ``chunk_id`` are used during
+        chunk based key rotation.
+        """       
+        derived_key, hmac_key, salt = self.gen_derived_key(session_id, media_id, chunk_id)
+        
+        data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
+        
+        data = self.gen_MAC(session_id, hmac_key, data)
+
+        ret = {
+            'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+            'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+            'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
+            'data': binascii.b2a_base64(data).decode('latin').strip(),
+        }
+        if chunk_id is not None:
+            ret.update({'media_id': media_id.decode('latin'), 'chunk_id': int(chunk_id.decode('latin'))})
+            
+        return json.dumps(ret).encode('latin')
+
+
+    def decrypt_response(self, session_id, data):
+        """Validate the response integrity and then decrypt the data."""
+
+        salt = binascii.a2b_base64(data['salt'].encode('latin'))
+        iv = binascii.a2b_base64(data['iv'].encode('latin'))
+        nonce = binascii.a2b_base64(data['nonce'].encode('latin'))
+        content = binascii.a2b_base64(data['data'].encode('latin'))
+        
+        derived_key, hmac_key, _ = self.gen_derived_key(session_id, salt=salt)
+        
+        data = self.verify_MAC(session_id, hmac_key, content)
+
+        if not data:
+            logger.debug("Integrity or authenticity compromised.")
+            return {'error': 'unknown'}
+        
+        return json.loads(self.decrypt_data(session_id, derived_key, iv, data, nonce))
 
 print("Server started")
 print("URL is: http://IP:8080")
