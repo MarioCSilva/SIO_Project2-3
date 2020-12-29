@@ -136,7 +136,7 @@ class MediaServer(resource.Resource):
 
         self.ciphers = ['AES','3DES','ChaCha20']
         self.digests = ['SHA-256','SHA-384','SHA-512']
-        self.ciphermodes = ['CBC','GCM','ECB']
+        self.ciphermodes = ['CBC','ECB']
 
         self.ca = CA('./crl')
         
@@ -407,6 +407,7 @@ class MediaServer(resource.Resource):
                 cipher, digest, ciphermode = self.choose_algorithms(ciphers, digests, ciphermodes)
                 
                 if cipher != choosen_cipher or digest != choosen_digest or ciphermode != choosen_mode:
+                    print(ciphermode, choosen_mode)
                     logger.debug("Algorithms did not match server's preferred choices.")
                     request.setResponseCode(404)
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
@@ -671,11 +672,9 @@ class MediaServer(resource.Resource):
         if cipher == 'ChaCha20':
             ciphermode = None
         elif 'CBC' in ciphermodes:
-            ciphermode = 'CBC'
-        elif 'GCM' in ciphermodes:
-            ciphermode = 'GCM'
-        elif 'ECB' in ciphermodes:
             ciphermode = 'ECB'
+        elif 'ECB' in ciphermodes:
+            ciphermode = 'CBC'
         else:
             return None, None, None
 
@@ -778,37 +777,30 @@ class MediaServer(resource.Resource):
             
     # Encrypt data
     def encrypt_data(self, session_id, derived_key, data): 
-        ## Key maybe ain't this...
-        ## Check Key size..
         key = derived_key
         session = self.sessions[session_id]
         cipher = session[Session.CIPHER]
         ciphermode = session[Session.MODE]
-
         nonce = None
 
         if cipher == 'ChaCha20':
             nonce = os.urandom(16)
-            algorithm = algorithms.ChaCha20(key, nonce)
-        elif cipher == 'AES':
-            algorithm = algorithms.AES(key)
-        elif cipher == '3DES':
-            algorithm = algorithms.TripleDES(key)
-
-        ## Check IV size..
-        iv = os.urandom(16)
-
-        if cipher == 'ChaCha20':
+            algorithm = algorithms.ChaCha20(key[:32], nonce)
             mode = None
-        elif ciphermode == 'CBC':
+            iv = os.urandom(16) 
+        elif cipher == 'AES':
+            algorithm = algorithms.AES(key[:32])
+            iv = os.urandom(16) 
+        elif cipher == '3DES':
+            algorithm = algorithms.TripleDES(key[:24])
+            iv = os.urandom(8) 
+
+        if ciphermode == 'CBC':
             mode = modes.CBC(iv)
             #Padding is required when using this mode.
             data = self.padding(algorithm.block_size, data)
-        elif ciphermode == 'GCM':
-            mode = modes.GCM(iv)
-            # This mode does not require padding.
         elif ciphermode == 'ECB':
-            mode = modes.ECB(iv)
+            mode = modes.ECB()
             #Padding is required when using this mode.
             data = self.padding(algorithm.block_size, data)
         
@@ -836,22 +828,18 @@ class MediaServer(resource.Resource):
         cipher = session[Session.CIPHER]
         ciphermode = session[Session.MODE]
 
-        if cipher == 'ChaCha20': # 256
-            algorithm = algorithms.ChaCha20(key, nonce)
+        if cipher == 'ChaCha20':
+            algorithm = algorithms.ChaCha20(key[:32], nonce)
             mode = None
-        elif cipher == 'AES': # 128, 192, 256
-            algorithm = algorithms.AES(key)
-        elif cipher == '3DES':# 64, 128, 192
-            algorithm = algorithm.TripleDES(key)
+        elif cipher == 'AES':
+            algorithm = algorithms.AES(key[:32])
+        elif cipher == '3DES':
+            algorithm = algorithms.TripleDES(key[:24])
 
-        ## Check IV size..
-        ## ChaCha mode is None maybe
         if ciphermode == 'CBC':
             mode = modes.CBC(iv)
-        elif ciphermode == 'GCM':
-            mode = modes.GCM(iv)
         elif ciphermode == 'ECB':
-            mode = modes.ECB(iv)
+            mode = modes.ECB()
 
         decryptor = Cipher(algorithm, mode).decryptor()
         data = decryptor.update(data) + decryptor.finalize()
@@ -876,7 +864,7 @@ class MediaServer(resource.Resource):
         ret = {
             'salt': binascii.b2a_base64(salt).decode('latin').strip(),
             'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-            'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
+            'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else '',
             'data': binascii.b2a_base64(data).decode('latin').strip(),
         }
         if chunk_id is not None:

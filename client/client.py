@@ -281,34 +281,27 @@ class Client:
         
             
     def encrypt_data(self, derived_key, data): 
-        ## Key maybe ain't this...
-        ## Check Key size..
         key = derived_key
-
         nonce = None
 
         if self.cipher == 'ChaCha20':
             nonce = os.urandom(16)
-            algorithm = algorithms.ChaCha20(key, nonce)
-        elif self.cipher == 'AES':
-            algorithm = algorithms.AES(key)
-        elif self.cipher == '3DES':
-            algorithm = algorithms.TripleDES(key)
-
-        ## Check IV size..
-        iv = os.urandom(16)
-
-        if self.cipher == 'ChaCha20':
+            algorithm = algorithms.ChaCha20(key[:32], nonce)
+            iv = os.urandom(16)
             mode = None
-        elif self.ciphermode == 'CBC':
+        elif self.cipher == 'AES':
+            algorithm = algorithms.AES(key[:32])
+            iv = os.urandom(16)
+        elif self.cipher == '3DES':
+            algorithm = algorithms.TripleDES(key[:24])
+            iv = os.urandom(8)
+
+        if self.ciphermode == 'CBC':
             mode = modes.CBC(iv)
             #Padding is required when using this mode.
             data = self.padding(algorithm.block_size, data)
-        elif self.ciphermode == 'GCM':
-            mode = modes.GCM(iv)
-            # This mode does not require padding.
         elif self.ciphermode == 'ECB':
-            mode = modes.ECB(iv)
+            mode = modes.ECB()
             #Padding is required when using this mode.
             data = self.padding(algorithm.block_size, data)
         
@@ -332,22 +325,18 @@ class Client:
     def decrypt_data(self, derived_key, iv, data, nonce=None):
         key = derived_key
 
-        if self.cipher == 'ChaCha20': # 256
-            algorithm = algorithms.ChaCha20(key, nonce)
+        if self.cipher == 'ChaCha20':
+            algorithm = algorithms.ChaCha20(key[:32], nonce)
             mode = None
-        elif self.cipher == 'AES': # 128, 192, 256
-            algorithm = algorithms.AES(key)
-        elif self.cipher == '3DES':# 64, 128, 192
-            algorithm = algorithm.TripleDES(key)
+        elif self.cipher == 'AES':
+            algorithm = algorithms.AES(key[:32])
+        elif self.cipher == '3DES':
+            algorithm = algorithms.TripleDES(key[:24])
 
-        ## Check IV size..
-        ## ChaCha mode is None maybe
         if self.ciphermode == 'CBC':
             mode = modes.CBC(iv)
-        elif self.ciphermode == 'GCM':
-            mode = modes.GCM(iv)
         elif self.ciphermode == 'ECB':
-            mode = modes.ECB(iv)
+            mode = modes.ECB()
             
         decryptor = Cipher(algorithm, mode).decryptor()
         data = decryptor.update(data) + decryptor.finalize()
@@ -370,7 +359,7 @@ class Client:
             'salt': binascii.b2a_base64(salt).decode('latin').strip(),
             'data': binascii.b2a_base64(data).decode('latin').strip(),
             'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-            'nonce': binascii.b2a_base64(nonce).decode('latin').strip()
+            'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else ''
         }).encode('latin')
 
 
@@ -539,7 +528,7 @@ def main():
                 'method': 'DOWNLOAD',
                 'media_id': media_item["id"],
                 'chunk_id': chunk,
-                'licence': client.licences.get(media_item["id"]) if client.licences.get(media_item["id"]) else binascii.b2a_base64(b'').decode('latin').strip()
+                'licence': client.licences.get(media_item["id"]) if client.licences.get(media_item["id"]) else ''
             }).encode('latin')
         else:
             data = json.dumps({
