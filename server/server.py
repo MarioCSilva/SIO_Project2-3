@@ -16,7 +16,6 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.primitives.asymmetric import padding as asymmetric_padding
 from cryptography.hazmat.primitives import hmac
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -76,7 +75,6 @@ class State:
 class User:
     CC_TOKEN = 0
     LICENCES = 1
-    #PASSWORD = 1
 
 # In authenticated DH, each party acquires a certificate for the other party.
 # The DH public key that each party sends to the other party is digitally
@@ -343,7 +341,9 @@ class MediaServer(resource.Resource):
 
         file_name = os.path.join(CATALOG_BASE, media_item['file_name'])
         with open(file_name, 'rb') as f:
-            data = CATALOG[media_id]['data'][offset : offset+CHUNK_SIZE]
+            data = json.dumps({
+                'chunk': binascii.b2a_base64(CATALOG[media_id]['data'][offset : offset+CHUNK_SIZE]).decode('latin').strip()
+            }).encode('latin')
             
             derived_key, hmac_key, salt = self.gen_derived_key(session_id, media_id.encode('latin'), str(chunk_id).encode('latin'))
 
@@ -422,14 +422,14 @@ class MediaServer(resource.Resource):
     def encrypted_post(self, request):
         data = json.loads(request.content.getvalue())
         
-        session_id = data['session_id']
+        session_id = int(request.getHeader('Authorization'))
         session = self.sessions[session_id]
 
         salt = binascii.a2b_base64(data['salt'].encode('latin'))
         iv = binascii.a2b_base64(data['iv'].encode('latin'))
         nonce = binascii.a2b_base64(data['nonce'].encode('latin'))
         
-        content = binascii.a2b_base64(data['content'].encode('latin'))
+        content = binascii.a2b_base64(data['data'].encode('latin'))
         
         derived_key, hmac_key, _ = self.gen_derived_key(session_id, salt=salt)
             
@@ -524,8 +524,8 @@ class MediaServer(resource.Resource):
                 ).not_valid_before(
                     datetime.datetime.utcnow()
                 ).not_valid_after(
-                    # Our certificate will be valid for 60 seconds
-                    datetime.datetime.utcnow() + datetime.timedelta(seconds=10)
+                    # the licence will be valid for 600 seconds
+                    datetime.datetime.utcnow() + datetime.timedelta(seconds=600)
                 ).sign(key, hashes.SHA256())
 
                 # Store licence in users dict
@@ -625,7 +625,6 @@ class MediaServer(resource.Resource):
                 self.sessions[session_id][Session.CERT] = client_cert
                 
                 return json.dumps({
-                        'method': 'HELLO',
                         'session_id': session_id,
                         'cipher': cipher,
                         'digest': digest,
@@ -641,7 +640,7 @@ class MediaServer(resource.Resource):
 
             elif request.path == b'/api/key_exchange':
                 
-                session_id = int(data['session_id'])
+                session_id = int(request.getHeader('Authorization'))
                 session = self.sessions[session_id]
                 
                 if session[Session.STATE] != State.HELLO:
@@ -661,16 +660,17 @@ class MediaServer(resource.Resource):
                     
                     client_cc_cert = x509.load_pem_x509_certificate(binascii.a2b_base64(cc_data['cc_cert']))
                     
-                    if not self.ca.validate_cert(client_cc_cert):
-                        logger.debug("Client's Certificate Invalid.")
-                        request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-                        return json.dumps({'error': 'certificate invalid'}, indent=4).encode('latin')
+                    # Can't validate this for all CC cards because we don't have
+                    # all the intermediate CA's for them
+                    logger.debug('Validating CC card...')
+                    # if not self.ca.validate_cert(client_cc_cert):
+                    #     logger.debug("Client's Certificate Invalid.")
+                    #     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+                    #     return json.dumps({'error': 'certificate invalid'}, indent=4).encode('latin')
                     
                     logger.debug("Client's Certificate Validated.")
                     
-                    try:
-                        client_cc_cert.public_key().verify(signed_token, token, asymmetric_padding.PKCS1v15(), hashes.SHA1())
-                    except InvalidSignature:
+                    if not self.ca.check_signature(client_cc_cert.public_key(), token, signed_token, hashes.SHA1()):
                         logger.debug("Client's Signature Invalid.")
                         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                         return json.dumps({'error': 'something went wrong'}, indent=4).encode('latin')
@@ -691,34 +691,23 @@ class MediaServer(resource.Resource):
                 session[Session.SHARED_KEY] = session[Session.PRI_KEY].exchange(client_public_key)
 
                 signed_public_key = binascii.a2b_base64(data['signed_public_key'].encode('latin'))
-
+                
                 if 'SHA-256' == session[Session.DIGEST]:
                     sign_digest = hashes.SHA256()
                 elif 'SHA-384' == session[Session.DIGEST]:
                     sign_digest = hashes.SHA384()
                 elif 'SHA-512' == session[Session.DIGEST]:
                     sign_digest = hashes.SHA512()
-
-                try:
-                    session[Session.CERT].public_key().verify(
-                        signed_public_key,
-                        session[Session.CLIPUB_KEY],
-                        asymmetric_padding.PSS(
-                            mgf=asymmetric_padding.MGF1(sign_digest),
-                            salt_length=asymmetric_padding.PSS.MAX_LENGTH
-                        ),
-                        sign_digest
-                    )
-                except InvalidSignature:
+                  
+                # Validate the signature of the client's DH public key
+                if not self.ca.check_signature(session[Session.CERT].public_key(), session[Session.CLIPUB_KEY], signed_public_key, sign_digest):
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                     return json.dumps({'error': 'something went wrong'}, indent=4).encode('latin')
-                    
-                signed_public_key = self.cert_priv_key.sign(
+                
+                # Sign the DH public key
+                signed_public_key = self.ca.make_signature(
+                    self.cert_priv_key,
                     session[Session.PUB_KEY].public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo),
-                    asymmetric_padding.PSS(
-                        mgf=asymmetric_padding.MGF1(sign_digest),
-                        salt_length=asymmetric_padding.PSS.MAX_LENGTH
-                    ),
                     sign_digest
                 )
                 
@@ -865,15 +854,6 @@ class MediaServer(resource.Resource):
 
         return derived_key, hmac_key, salt
 
-    '''
-    ChaCha20 Decrypt
-    >>> decryptor = cipher.decryptor()
-    >>> decryptor.update(ct)
-    >>> import os
-    >>> from cryptography.hazmat.primitives.ciphers.modes import CBC
-    >>> iv = os.urandom(16)
-    >>> mode = CBC(iv)
-    '''
 
     def diffie_hellman(self, generator, key_size):
         parameters = dh.generate_parameters(generator=generator, key_size=key_size)

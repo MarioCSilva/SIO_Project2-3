@@ -4,10 +4,9 @@ from os import scandir
 from datetime import datetime
 
 import cryptography
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 logger = logging.getLogger('root')
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -32,6 +31,7 @@ class CA:
 
         self.load_certs(self.trusted_CA, trusted = True)
         self.load_certs(self.intermediate)
+
 
     def load_certs(self, certs_dir, trusted=False):
         for obj in scandir(certs_dir):
@@ -162,4 +162,36 @@ class CA:
         except:
             return False
 
+        return True
+    
+
+    def make_signature(self, private_key, message, digest):
+        """Sign a message with a private key.
+        
+        :return: a signature
+        """
+        return private_key.sign(
+            message,
+            padding.PSS(
+                mgf=padding.MGF1(digest),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            digest
+        )
+        
+
+    def check_signature(self, public_key, message, signature, digest) -> bool:
+        """Validate a signature given a private key and the original message."""
+        try:
+            public_key.verify(
+                signature,
+                message,
+                padding.PSS(
+                    mgf=padding.MGF1(digest),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                digest
+            )
+        except InvalidSignature:
+            return False
         return True

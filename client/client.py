@@ -16,7 +16,6 @@ from cryptography.hazmat.primitives import hmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.primitives.asymmetric import padding as asymmetric_padding
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -73,231 +72,198 @@ class Client:
                 password=None,
             )
 
+    def get_digest(self):
+        if 'SHA-256' == self.digest:
+            return hashes.SHA256()
+        elif 'SHA-384' == self.digest:
+            return hashes.SHA384()
+        elif 'SHA-512' == self.digest:
+            return hashes.SHA512()
+        else:
+            return None
+        
     
-    def send_message(self, message, method):
-        # Negotiate algorithms
-        data = json.dumps( message ).encode()
-
+    def send_message(self, data, method):
         if method == 'HELLO':
             req = requests.post( f'{SERVER_URL}/api/hello', data=data, headers={ b"content-type": b"application/json" } )
-            response = req.json()
-
-            if response['method'] != 'HELLO':
-                logger.debug("Restarting communications")
-                self.negotiate()
-
-            self.cipher = response['cipher']
-            self.ciphermode = response['ciphermode']
-            self.digest = response['digest']
-            self.session_id = response['session_id']
-
-            if 'SHA-256' == self.digest:
-                sign_digest = hashes.SHA256()
-            elif 'SHA-384' == self.digest:
-                sign_digest = hashes.SHA384()
-            elif 'SHA-512' == self.digest:
-                sign_digest = hashes.SHA512()
-
-
-            self.server_dh_pubkey = response['public_key'].encode()
-
-            p, g, key_size = response['parameters']['p'],\
-                             response['parameters']['g'],\
-                             response['parameters']['key_size']
-                                   
-            self.diffie_hellman(p, g, key_size)
-            
-            
-            print("Choose one of the following authentication methods:")  
-            for k, v in response['2-factor'].items():
-                print(f"{k} - {v}")   
-
-            choice = ''
-            cc_cert = ''
-            
-            signed_DH_pub_key = self.cert_priv_key.sign(
-                self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo),
-                asymmetric_padding.PSS(
-                    mgf=asymmetric_padding.MGF1(sign_digest),
-                    salt_length=asymmetric_padding.PSS.MAX_LENGTH
-                ),
-                sign_digest
-            )
-            
-            while choice not in response['2-factor'].keys():
-                choice = input('> ')
-                if choice == '1':
-                    logger.debug('Inserting 2-factor CC Token')
-                    cc_authenticator = CC_Authenticator()
-                    
-                    self.cc_cert = cc_authenticator.get_certificate()
-                    cc_cert = self.cc_cert.public_bytes(Encoding.PEM)
-                    
-                    token = os.urandom(256)
-                    signed_token = cc_authenticator.get_signature(token)
-                    
-                    cc_data = json.dumps({
-                        'choice': choice,
-                        'cc_cert': binascii.b2a_base64(cc_cert).decode('latin').strip(),
-                        'token': binascii.b2a_base64(token).decode('latin').strip(),
-                        'signed_token': binascii.b2a_base64(signed_token).decode('latin').strip()
-                    }).encode('latin')
-                else:
-                    cc_data = json.dumps({
-                        'choice': choice,
-                    }).encode('latin')
-                    
-                self.send_message( {
-                        'method': 'KEY_EXCHANGE',
-                        'session_id': self.session_id, 
-                        'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
-                        'cc_data': binascii.b2a_base64(cc_data).decode('latin').strip(),
-                        'signed_public_key':  binascii.b2a_base64(signed_DH_pub_key).decode('latin').strip()
-                }, 'KEY_EXCHANGE' )
-                
-        elif method == 'KEY_EXCHANGE':
-            req = requests.post( f'{SERVER_URL}/api/key_exchange', data=data, headers={ b"content-type": b"application/json" } )
-            response = req.json() #TODO: em todos os req.json() verificar se tem a key 'error'
-            
-            iv = binascii.a2b_base64(response['iv'].encode('latin'))
-            salt = binascii.a2b_base64(response['salt'].encode('latin'))
-            data = binascii.a2b_base64(response['data'].encode('latin'))
-            nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
-            
-            derived_key, hmac_key, _ = self.gen_derived_key(salt=salt)
-            data = self.verify_MAC(hmac_key, data)
-            if not data:
-                logger.debug("Integrity or authenticity compromised.")
-                exit()
-            data = json.loads(self.decrypt_data(derived_key, iv, data, nonce))
-            
-            signed_public_key = binascii.a2b_base64(data['signed_public_key'].encode('latin'))
-            
-            if 'SHA-256' == self.digest:
-                sign_digest = hashes.SHA256()
-            elif 'SHA-384' == self.digest:
-                sign_digest = hashes.SHA384()
-            elif 'SHA-512' == self.digest:
-                sign_digest = hashes.SHA512()
-                
-            try:
-                self.server_cert.public_key().verify(
-                    signed_public_key,
-                    self.server_dh_pubkey,
-                    asymmetric_padding.PSS(
-                        mgf=asymmetric_padding.MGF1(sign_digest),
-                        salt_length=asymmetric_padding.PSS.MAX_LENGTH
-                    ),
-                    sign_digest
-                )
-            except InvalidSignature:
-                logger.debug("Restarting communications")
-                self.negotiate()
-
-            derived_key, hmac_key, salt = self.gen_derived_key()
-            
-            data = json.dumps({
-                'method': 'CONFIRM',
-                'algorithms': {
-                    'ciphers': self.ciphers,
-                    'chosen_cipher': self.cipher,
-                    'digests': self.digests,
-                    'chosen_digest': self.digest,
-                    'ciphermodes': self.ciphermodes,
-                    'chosen_mode': self.ciphermode
-                },
-            }).encode('latin')
-            
-            data, iv, nonce = self.encrypt_data(derived_key, data)
-            
-            data = self.gen_MAC(hmac_key, data)
-            
-            data = {
-                'session_id': self.session_id,
-                'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-                'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-                'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else binascii.b2a_base64(b'').decode('latin').strip(),
-                'content': binascii.b2a_base64(data).decode('latin').strip()
-            }
-            
-            self.send_message(data, 'CONFIRM')
-                
-        elif method == 'CONFIRM':
-            req = requests.post( f'{SERVER_URL}/api', data=data, headers={ b"content-type": b"application/json" } )
-            response = req.json()
-            
-            if req.status_code == 404 or req.status_code == 401:
-                logger.debug("Restarting communications. Reason: server did not confirm integrity or authenticity.")
-                self.negotiate()
-            
-            iv = binascii.a2b_base64(response['iv'].encode('latin'))
-            salt = binascii.a2b_base64(response['salt'].encode('latin'))
-            data = binascii.a2b_base64(response['data'].encode('latin'))
-            nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
-
-            # Generate ephemeral key and hmac key
-            derived_key, hmac_key, _ = self.gen_derived_key(salt=salt)
-
-            data = self.verify_MAC(hmac_key, data)
-
-            # Verify MAC
-            if not data:
-                logger.debug("Integrity or authenticity compromised.")
-                exit()
-
-            # Decrypt Data
-            data = json.loads(self.decrypt_data(derived_key, iv, data, nonce))
-            
-            self.methods = data['methods']
-
-            for k in self.methods:
-                print(k)
-                for v in self.methods[k]:
-                    print(f' {v}')
-        else:
-            return ''
-    
-    
-    def negotiate(self):
-        """Send supported client suited ciphers encrypted with client certificate private key."""
+            return req.json()
         
-        req = requests.get(f'{SERVER_URL}/api/cert')
-        if req.status_code == 200:
-            print("Got Server's Certificate")
-            
-        response = req.json()
+        elif method == 'KEY_EXCHANGE':
+            req = requests.post( f'{SERVER_URL}/api/key_exchange', data=data, headers={ b"content-type": b"application/json",
+                                                                                        b"Authorization": str(self.session_id) } )
+            return req.json()
+        
+        elif method == 'CONFIRM':
+            req = requests.post( f'{SERVER_URL}/api', data=data, headers={ b"content-type": b"application/json",
+                                                                           b"Authorization": str(self.session_id)} )
+            return req.json()
+        else:
+            logger.error('No such method')
+            return ''
+        
+    def get_message(self, path, authorization=None, content=None):
+        if authorization is None:
+            req = requests.get(f'{SERVER_URL}{path}')
+        else:
+            req = requests.get(f'{SERVER_URL}{path}', headers={
+                b"Authorization": authorization,
+                b"Content": content
+            })
+      
+        return req.json()
+        
+    def negotiate(self):
+        """(Re)start the handshake with the server."""
+                
+        response = self.get_message('/api/cert')
+        logger.info("Got Server's Certificate")
 
         server_cert = binascii.a2b_base64(response['cert'])
-        
+
         self.server_cert = x509.load_pem_x509_certificate(server_cert)
-        
+
         # Validate Server's Certificate
         if not self.ca.validate_cert(self.server_cert):
             logger.debug("Server's Certificate Invalid.")
             exit(1)
-            
+
         logger.debug("Server's Certificate Validated.")
-        
+
         self.server_pub_key = self.server_cert.public_key()
         
-        data = {
+        """Send supported client suited ciphers."""
+        data = json.dumps({
             'cert': binascii.b2a_base64(self.cert.public_bytes(Encoding.PEM)).decode('latin').strip(),
             'method': 'HELLO',
             'ciphers': self.ciphers,
             'digests': self.digests,
             'ciphermodes': self.ciphermodes
-        }
-
-        # content2 = self.server_pub_key.encrypt(
-        #     content,
-        #     asymmetric_padding.OAEP(
-        #         mgf=asymmetric_padding.MGF1(algorithm=hashes.SHA256()),
-        #         algorithm=hashes.SHA256(),
-        #         label=None
-        #     )
-        # )
+        }).encode()
         
-        self.send_message(data, 'HELLO')
+        # State HELLO
+        response = self.send_message(data, 'HELLO')
+            
+        data = self.handle_hello(response)
+        
+        # State KEY_EXCHANGE
+        response = self.send_message(data, 'KEY_EXCHANGE' )
+
+        data = self.decrypt_response(response)
+
+        data = self.handle_key_exchange(data)
+
+        data = self.encrypt_request(data)
+            
+        # State CONFIRM
+        response = self.send_message( data, 'CONFIRM')
+        
+        data = self.handle_confirm(response)
+        
+        data = self.decrypt_response(response)
+        
+        # State ALLOW
+        self.methods = data['methods']
+
+        for k in self.methods:
+            print(k)
+            for v in self.methods[k]:
+                print(f' {v}')
+    
+
+    def handle_hello(self, response):
+        """ DH
+        Generate shared key.
+        Sign the 
+        """
+        self.cipher = response['cipher']
+        self.ciphermode = response['ciphermode']
+        self.digest = response['digest']
+        self.session_id = response['session_id']
+
+        self.server_dh_pubkey = response['public_key'].encode()
+
+        p, g, key_size = response['parameters']['p'],\
+                         response['parameters']['g'],\
+                         response['parameters']['key_size']
+                                
+        self.diffie_hellman(p, g, key_size)
+        
+        print("Choose one of the following authentication methods:")  
+        for k, v in response['2-factor'].items():
+            print(f"{k} - {v}")   
+
+        choice = ''
+        cc_cert = ''
+        
+        signed_DH_pub_key = self.ca.make_signature(
+            self.cert_priv_key,
+            self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo),
+            self.get_digest()
+        )
+        
+        while choice not in response['2-factor'].keys():
+            choice = input('> ')
+
+        if choice == '1':
+            logger.debug('Inserting 2-factor CC Token')
+            cc_authenticator = CC_Authenticator()
+            
+            self.cc_cert = cc_authenticator.get_certificate()
+            cc_cert = self.cc_cert.public_bytes(Encoding.PEM)
+            
+            token = os.urandom(256)
+            signed_token = cc_authenticator.get_signature(token)
+            
+            cc_data = json.dumps({
+                'choice': choice,
+                'cc_cert': binascii.b2a_base64(cc_cert).decode('latin').strip(),
+                'token': binascii.b2a_base64(token).decode('latin').strip(),
+                'signed_token': binascii.b2a_base64(signed_token).decode('latin').strip()
+            }).encode('latin')
+        else:
+            cc_data = json.dumps({
+                'choice': choice,
+            }).encode('latin')
+            
+        return json.dumps({
+                'method': 'KEY_EXCHANGE',
+                'public_key': self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
+                'cc_data': binascii.b2a_base64(cc_data).decode('latin').strip(),
+                'signed_public_key':  binascii.b2a_base64(signed_DH_pub_key).decode('latin').strip()
+        })
+
+
+    def handle_key_exchange(self, response):            
+        signed_public_key = binascii.a2b_base64(response['signed_public_key'].encode('latin'))
+        
+        if not self.ca.check_signature(self.server_cert.public_key(), self.server_dh_pubkey, signed_public_key, self.get_digest()):
+            logger.debug("Something went wrong")
+            self.negotiate()
+
+        return json.dumps({
+            'method': 'CONFIRM',
+            'algorithms': {
+                'ciphers': self.ciphers,
+                'chosen_cipher': self.cipher,
+                'digests': self.digests,
+                'chosen_digest': self.digest,
+                'ciphermodes': self.ciphermodes,
+                'chosen_mode': self.ciphermode
+            },
+        }).encode('latin')
+
+
+    def handle_confirm(self, response):
+        if self.handle_error(response):
+            logger.warning("Restarting communications.")
+            self.negotiate()
+
+        
+    def handle_error(self, response):
+        if 'error' in response:
+            logger.error(response['error'])
+            return True
+        return False
 
     
     def diffie_hellman(self, p, g, key_size):
@@ -318,7 +284,6 @@ class Client:
         self.shared_key = self.private_key.exchange(server_public_key)
         
             
-    # Encrypt data
     def encrypt_data(self, derived_key, data): 
         ## Key maybe ain't this...
         ## Check Key size..
@@ -368,7 +333,6 @@ class Client:
         return unpadder.update(data) + unpadder.finalize()
 
 
-    # Decrypt data
     def decrypt_data(self, derived_key, iv, data, nonce=None):
         key = derived_key
 
@@ -394,9 +358,50 @@ class Client:
 
         if self.ciphermode in {'CBC', 'ECB'}:
             data = self.unpadder(algorithm.block_size, data)
-
         return data
 
+
+    def encrypt_request(self, data):
+        """Encrypt a request with integrity validation."""
+
+        derived_key, hmac_key, salt = self.gen_derived_key()
+            
+        data, iv, nonce = self.encrypt_data(derived_key, data)
+        
+        data = self.gen_MAC(hmac_key, data)
+
+        return json.dumps({
+            'salt': binascii.b2a_base64(salt).decode('latin').strip(),
+            'data': binascii.b2a_base64(data).decode('latin').strip(),
+            'iv': binascii.b2a_base64(iv).decode('latin').strip(),
+            'nonce': binascii.b2a_base64(nonce).decode('latin').strip()
+        }).encode('latin')
+
+
+    def decrypt_response(self, response, media_id=None, chunk_id=None):
+        """Validate the response integrity and then encrypt the response.
+        
+        The parameters ``media_id`` and ``chunk_id`` are used during
+        chunk based key rotation.
+        """
+        iv = binascii.a2b_base64(response['iv'].encode('latin'))
+        salt = binascii.a2b_base64(response['salt'].encode('latin'))
+        data = binascii.a2b_base64(response['data'].encode('latin'))
+        nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
+        
+        # Generate ephemeral key and hmac key
+        derived_key, hmac_key, _ = self.gen_derived_key(media_id, chunk_id, salt)
+        
+        data = self.verify_MAC(hmac_key, data)
+
+        # Verify MAC
+        if not data:
+            logger.debug("Integrity or authenticity compromised.")
+            exit()
+        
+        # Decrypt Data
+        return json.loads(self.decrypt_data(derived_key, iv, data, nonce))
+    
 
     def gen_MAC(self, hmac_key, data):
         if self.digest == 'SHA-256':
@@ -448,7 +453,6 @@ class Client:
             salt = os.urandom(128)
         salt_init = salt
 
-
         digest_shared_key = hashes.Hash(digest)
         digest_shared_key.update(self.shared_key)
         shared_key = digest_shared_key.finalize()
@@ -458,10 +462,8 @@ class Client:
             # result = bytearray()
             # chunk_id_b = bytes(chunk_id)
             # media_id_b = bytes(media_id)
-
             # for b1, b2, b3 in zip(salt, [0]*(len(salt)-len(chunk_id_b)) + list(chunk_id_b), [0]*(len(salt)-len(media_id_b)) + list(media_id_b)):
             #     result.append(b1 ^ b2 ^ b3)
-
             # salt_init = bytes(result)
             
         self.shared_key = shared_key
@@ -494,43 +496,12 @@ def main():
         'method': 'LIST'
     }).encode('latin')
 
-    derived_key, hmac_key, salt = client.gen_derived_key()
-    data, iv, nonce = client.encrypt_data(derived_key, data)
-    data = client.gen_MAC(hmac_key, data)
+    content = client.encrypt_request(data)
 
-    content = json.dumps({
-        'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-        'data': binascii.b2a_base64(data).decode('latin').strip(),
-        'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-        'nonce': binascii.b2a_base64(nonce).decode('latin').strip()
-    }).encode('latin')
+    response = client.get_message('/api', str(client.session_id), content)
+    logger.info("Got Server List")
 
-    req = requests.get(f'{SERVER_URL}/api', headers={
-        b"Authorization": str(client.session_id),
-        b"Content": content
-    })
-
-    if req.status_code == 200:
-        print("Got Server List")
-    response = req.json()
-
-    iv = binascii.a2b_base64(response['iv'].encode('latin'))
-    salt = binascii.a2b_base64(response['salt'].encode('latin'))
-    data = binascii.a2b_base64(response['data'].encode('latin'))
-    nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
-
-    # Generate ephemeral key and hmac key
-    derived_key, hmac_key, _ = client.gen_derived_key(salt=salt)
-
-    data = client.verify_MAC(hmac_key, data)
-
-    # Verify MAC
-    if not data:
-        logger.debug("Integrity or authenticity compromised.")
-        exit()
-
-    # Decrypt Data
-    media_list = json.loads(client.decrypt_data(derived_key, iv, data, nonce))
+    media_list = client.decrypt_response(response)
 
     # Present a simple selection menu    
     idx = 0
@@ -581,23 +552,9 @@ def main():
                 'chunk_id': chunk,
             }).encode('latin')
 
-        derived_key, hmac_key, salt = client.gen_derived_key()
-        data, iv, nonce = client.encrypt_data(derived_key, data)
-        data = client.gen_MAC(hmac_key, data)
+        content = client.encrypt_request(data)
 
-        content = json.dumps({
-            'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-            'data': binascii.b2a_base64(data).decode('latin').strip(),
-            'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-            'nonce': binascii.b2a_base64(nonce).decode('latin').strip()
-        }).encode('latin')
-
-        req = requests.get(f'{SERVER_URL}/api', headers={ 
-            b"Authorization": str(client.session_id),
-            b"Content": content
-        })
-        
-        response = req.json()
+        response = client.get_message('/api', str(client.session_id), content)
 
         # Client has no licence
         if 'error' in response:
@@ -608,40 +565,15 @@ def main():
                 'media_id': media_item["id"],
             }).encode('latin')
 
-            derived_key, hmac_key, salt = client.gen_derived_key()
-            data, iv, nonce = client.encrypt_data(derived_key, data)
-            data = client.gen_MAC(hmac_key, data)
-
-            content = json.dumps({
-                'session_id': client.session_id,
-                'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-                'content': binascii.b2a_base64(data).decode('latin').strip(),
-                'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-                'nonce': binascii.b2a_base64(nonce).decode('latin').strip()
-            }).encode('latin')
+            content = client.encrypt_request(data)
             
-            response = requests.post(f'{SERVER_URL}/api', data=content, headers={ b"content-type": b"application/json" })
+            response = requests.post(f'{SERVER_URL}/api', data=content, headers={ b"content-type": b"application/json",
+                                                                                  b"Authorization": str(client.session_id)} )
 
             response = response.json()
             
-            iv = binascii.a2b_base64(response['iv'].encode('latin'))
-            salt = binascii.a2b_base64(response['salt'].encode('latin'))
-            data = binascii.a2b_base64(response['data'].encode('latin'))
-            nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
-            data = binascii.a2b_base64(response['data'].encode('latin'))
+            data = client.decrypt_response(response)
             
-            # Generate ephemeral key and hmac key
-            derived_key, hmac_key, _ = client.gen_derived_key(salt=salt)
-            
-            data = client.verify_MAC(hmac_key, data)
-
-            # Verify MAC
-            if not data:
-                logger.debug("Integrity or authenticity compromised.")
-                exit()  
-            
-            # Decrypt Data
-            data = json.loads(client.decrypt_data(derived_key, iv, data, nonce))
             licence = binascii.a2b_base64(data['licence'].encode('latin'))
             
             client.licences[media_item["id"]] = licence
@@ -652,53 +584,23 @@ def main():
                 'chunk_id': chunk,
                 'licence': binascii.b2a_base64(client.licences.get(media_item["id"])).decode('latin').strip()
             }).encode('latin')
-
-            derived_key, hmac_key, salt = client.gen_derived_key()
-            data, iv, nonce = client.encrypt_data(derived_key, data)
-            data = client.gen_MAC(hmac_key, data)
-
-            content = json.dumps({
-                'salt': binascii.b2a_base64(salt).decode('latin').strip(),
-                'data': binascii.b2a_base64(data).decode('latin').strip(),
-                'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-                'nonce': binascii.b2a_base64(nonce).decode('latin').strip()
-            }).encode('latin')
-
-            req = requests.get(f'{SERVER_URL}/api', headers={ 
-                b"Authorization": str(client.session_id),
-                b"Content": content
-            })
             
-            response = req.json()
+            content = client.encrypt_request(data)
+
+            response = client.get_message('/api', str(client.session_id), content)
             
             if 'error' in response:
                 logger.debug('Something went wrong.')
                 exit()
-            
 
-
-        iv = binascii.a2b_base64(response['iv'].encode('latin'))
-        salt = binascii.a2b_base64(response['salt'].encode('latin'))
-        data = binascii.a2b_base64(response['data'].encode('latin'))
-        nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
-        media_id = response['media_id']
-        chunk_id = response['chunk_id']
+        media_id = response['media_id'].encode('latin')
+        chunk_id = str(response['chunk_id']).encode('latin')
         
-        # Generate ephemeral key and hmac key
-        derived_key, hmac_key, _ = client.gen_derived_key(media_id.encode('latin'), str(chunk_id).encode('latin'), salt)
-        
-        data = client.verify_MAC(hmac_key, data)
+        data = client.decrypt_response(response, media_id, chunk_id)
 
-        # Verify MAC
-        if not data:
-            logger.debug("Integrity or authenticity compromised.")
-            exit()  
-        
-        # Decrypt Data
-        data = client.decrypt_data(derived_key, iv, data, nonce)
-
+        chunk = binascii.a2b_base64(data['chunk'])
         try:
-            proc.stdin.write(data)
+            proc.stdin.write(chunk)
         except:
             break
 
