@@ -828,16 +828,14 @@ class MediaServer(resource.Resource):
         cipher = session[Session.CIPHER]
         ciphermode = session[Session.MODE]
 
-        if cipher == 'ChaCha20': # 256
+        if cipher == 'ChaCha20':
             algorithm = algorithms.ChaCha20(key[:32], nonce)
             mode = None
-        elif cipher == 'AES': # 128, 192, 256
+        elif cipher == 'AES':
             algorithm = algorithms.AES(key[:32])
-        elif cipher == '3DES':# 64, 128, 192
+        elif cipher == '3DES':
             algorithm = algorithms.TripleDES(key[:24])
 
-        ## Check IV size..
-        ## ChaCha mode is None maybe
         if ciphermode == 'CBC':
             mode = modes.CBC(iv)
         elif ciphermode == 'ECB':

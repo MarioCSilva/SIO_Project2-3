@@ -325,16 +325,13 @@ class Client:
     def decrypt_data(self, derived_key, iv, data, nonce=None):
         key = derived_key
 
-        if self.cipher == 'ChaCha20': # 256
+        if self.cipher == 'ChaCha20':
             algorithm = algorithms.ChaCha20(key[:32], nonce)
             mode = None
-        elif self.cipher == 'AES': # 128, 192, 256
+        elif self.cipher == 'AES':
             algorithm = algorithms.AES(key[:32])
-        elif self.cipher == '3DES':# 64, 128, 192
+        elif self.cipher == '3DES':
             algorithm = algorithms.TripleDES(key[:24])
-
-        ## Check IV size..
-        ## ChaCha mode is None maybe
 
         if self.ciphermode == 'CBC':
             mode = modes.CBC(iv)
