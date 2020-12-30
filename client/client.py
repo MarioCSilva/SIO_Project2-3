@@ -282,19 +282,17 @@ class Client:
             
     def encrypt_data(self, derived_key, data): 
         key = derived_key
-        nonce = None
 
         if self.cipher == 'ChaCha20':
-            nonce = os.urandom(16)
-            algorithm = algorithms.ChaCha20(key[:32], nonce)
-            iv = os.urandom(16)
             mode = None
+            iv = nonce = os.urandom(16)
+            algorithm = algorithms.ChaCha20(key[:32], nonce)
         elif self.cipher == 'AES':
-            algorithm = algorithms.AES(key[:32])
             iv = os.urandom(16)
+            algorithm = algorithms.AES(key[:32])
         elif self.cipher == '3DES':
-            algorithm = algorithms.TripleDES(key[:24])
             iv = os.urandom(8)
+            algorithm = algorithms.TripleDES(key[:24])
 
         if self.ciphermode == 'CBC':
             mode = modes.CBC(iv)
@@ -308,7 +306,7 @@ class Client:
         encryptor = Cipher(algorithm, mode).encryptor()
         encrypted_data = encryptor.update(data) + encryptor.finalize()
 
-        return encrypted_data, iv, nonce
+        return encrypted_data, iv
 
 
     def padding(self, block_size, data):
@@ -322,12 +320,12 @@ class Client:
         return unpadder.update(data) + unpadder.finalize()
 
 
-    def decrypt_data(self, derived_key, iv, data, nonce=None):
+    def decrypt_data(self, derived_key, iv, data):
         key = derived_key
 
         if self.cipher == 'ChaCha20':
-            algorithm = algorithms.ChaCha20(key[:32], nonce)
             mode = None
+            algorithm = algorithms.ChaCha20(key[:32], iv)
         elif self.cipher == 'AES':
             algorithm = algorithms.AES(key[:32])
         elif self.cipher == '3DES':
@@ -350,16 +348,13 @@ class Client:
         """Encrypt a request with integrity validation."""
 
         derived_key, hmac_key, salt = self.gen_derived_key()
-            
-        data, iv, nonce = self.encrypt_data(derived_key, data)
-        
+        data, iv = self.encrypt_data(derived_key, data)
         data = self.gen_MAC(hmac_key, data)
 
         return json.dumps({
             'salt': binascii.b2a_base64(salt).decode('latin').strip(),
             'data': binascii.b2a_base64(data).decode('latin').strip(),
             'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-            'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else ''
         }).encode('latin')
 
 
@@ -372,7 +367,6 @@ class Client:
         iv = binascii.a2b_base64(response['iv'].encode('latin'))
         salt = binascii.a2b_base64(response['salt'].encode('latin'))
         data = binascii.a2b_base64(response['data'].encode('latin'))
-        nonce = binascii.a2b_base64(response['nonce'].encode('latin'))
         
         # Generate ephemeral key and hmac key
         derived_key, hmac_key, _ = self.gen_derived_key(media_id, chunk_id, salt)
@@ -385,7 +379,7 @@ class Client:
             exit()
         
         # Decrypt Data
-        return json.loads(self.decrypt_data(derived_key, iv, data, nonce))
+        return json.loads(self.decrypt_data(derived_key, iv, data))
     
 
     def gen_MAC(self, hmac_key, data):
@@ -414,7 +408,6 @@ class Client:
             return None
 
         mac_digest = hmac.HMAC(hmac_key, digest)
-
         mac_digest.update(data[:-digest.digest_size])
 
         try:
@@ -452,10 +445,9 @@ class Client:
             # salt_init = bytes(result)
             
         self.shared_key = shared_key
-        # Check length here and salt
         derived_key = HKDF(
             algorithm = digest,
-            length = 64,  # TODO: revise this value
+            length = 64,
             salt = salt_init,
             info = b'handshake info',
         ).derive(shared_key)

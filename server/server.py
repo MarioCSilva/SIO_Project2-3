@@ -652,11 +652,11 @@ class MediaServer(resource.Resource):
         
     def choose_algorithms(self, ciphers, digests, ciphermodes):
         if 'ChaCha20' in ciphers:
-            cipher = 'ChaCha20'
-        elif 'AES' in ciphers:
-            cipher = 'AES'
-        elif '3DES' in ciphers:
             cipher = '3DES'
+        elif 'AES' in ciphers:
+            cipher = 'ChaCha20'
+        elif '3DES' in ciphers:
+            cipher = 'AES'
         else:
             return None, None, None
 
@@ -744,10 +744,9 @@ class MediaServer(resource.Resource):
             shared_key = shared_key + bytes(chunk_id) + bytes(media_id)
             
         session[Session.SHARED_KEY] = shared_key
-        # Check length here and salt
         derived_key = HKDF(
             algorithm=digest,
-            length=64,  # TODO: revise this value
+            length=64,
             salt=salt_init,
             info=b'handshake info',
         ).derive(shared_key)
@@ -764,7 +763,7 @@ class MediaServer(resource.Resource):
         private_key = parameters.generate_private_key()
         public_key = private_key.public_key()
 
-        # Check concurrency here...
+        # TODO: Check concurrency here...
         session_id = self.cur_session_id
         self.cur_session_id += 1
         self.sessions[session_id] = [None] * 10
@@ -774,26 +773,24 @@ class MediaServer(resource.Resource):
         pn = parameters.parameter_numbers()
 
         return pn.p, pn.g, session_id
-            
-    # Encrypt data
+
+
     def encrypt_data(self, session_id, derived_key, data): 
         key = derived_key
         session = self.sessions[session_id]
         cipher = session[Session.CIPHER]
         ciphermode = session[Session.MODE]
-        nonce = None
 
         if cipher == 'ChaCha20':
-            nonce = os.urandom(16)
-            algorithm = algorithms.ChaCha20(key[:32], nonce)
             mode = None
-            iv = os.urandom(16) 
+            iv = nonce = os.urandom(16)
+            algorithm = algorithms.ChaCha20(key[:32], nonce)
         elif cipher == 'AES':
-            algorithm = algorithms.AES(key[:32])
             iv = os.urandom(16) 
+            algorithm = algorithms.AES(key[:32])
         elif cipher == '3DES':
-            algorithm = algorithms.TripleDES(key[:24])
             iv = os.urandom(8) 
+            algorithm = algorithms.TripleDES(key[:24])
 
         if ciphermode == 'CBC':
             mode = modes.CBC(iv)
@@ -807,7 +804,7 @@ class MediaServer(resource.Resource):
         encryptor = Cipher(algorithm, mode).encryptor()
         encrypted_data = encryptor.update(data) + encryptor.finalize()
         
-        return encrypted_data, iv, nonce
+        return encrypted_data, iv
 
 
     def padding(self, block_size, data):
@@ -821,16 +818,15 @@ class MediaServer(resource.Resource):
         return unpadder.update(data) + unpadder.finalize()
 
 
-    # Decrypt data
-    def decrypt_data(self, session_id, derived_key, iv, data, nonce=None): 
+    def decrypt_data(self, session_id, derived_key, iv, data): 
         key = derived_key
         session = self.sessions[session_id]
         cipher = session[Session.CIPHER]
         ciphermode = session[Session.MODE]
 
         if cipher == 'ChaCha20':
-            algorithm = algorithms.ChaCha20(key[:32], nonce)
             mode = None
+            algorithm = algorithms.ChaCha20(key[:32], iv)
         elif cipher == 'AES':
             algorithm = algorithms.AES(key[:32])
         elif cipher == '3DES':
@@ -849,6 +845,7 @@ class MediaServer(resource.Resource):
         
         return data
 
+
     def encrypt_request(self, session_id, data, media_id=None, chunk_id=None):
         """Encrypt a request with integrity validation.
         
@@ -856,15 +853,12 @@ class MediaServer(resource.Resource):
         chunk based key rotation.
         """       
         derived_key, hmac_key, salt = self.gen_derived_key(session_id, media_id, chunk_id)
-        
-        data, iv, nonce = self.encrypt_data(session_id, derived_key, data)
-        
+        data, iv = self.encrypt_data(session_id, derived_key, data)
         data = self.gen_MAC(session_id, hmac_key, data)
 
         ret = {
             'salt': binascii.b2a_base64(salt).decode('latin').strip(),
             'iv': binascii.b2a_base64(iv).decode('latin').strip(),
-            'nonce': binascii.b2a_base64(nonce).decode('latin').strip() if nonce else '',
             'data': binascii.b2a_base64(data).decode('latin').strip(),
         }
         if chunk_id is not None:
@@ -878,18 +872,17 @@ class MediaServer(resource.Resource):
 
         salt = binascii.a2b_base64(data['salt'].encode('latin'))
         iv = binascii.a2b_base64(data['iv'].encode('latin'))
-        nonce = binascii.a2b_base64(data['nonce'].encode('latin'))
         content = binascii.a2b_base64(data['data'].encode('latin'))
         
         derived_key, hmac_key, _ = self.gen_derived_key(session_id, salt=salt)
-        
         data = self.verify_MAC(session_id, hmac_key, content)
 
         if not data:
             logger.debug("Integrity or authenticity compromised.")
             return {'error': 'unknown'}
         
-        return json.loads(self.decrypt_data(session_id, derived_key, iv, data, nonce))
+        return json.loads(self.decrypt_data(session_id, derived_key, iv, data))
+
 
 print("Server started")
 print("URL is: http://IP:8080")
