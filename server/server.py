@@ -48,11 +48,11 @@ CATALOG = { '898a08080d1840793122b7e118b27a95d117ebce':
                 'data': None
             }
         }
-
 CATALOG_BASE = 'catalog'
 CHUNK_SIZE = 1024 * 4
 FILES_IV = b'\x12\x9c\xef+\xe8\rI5\xb4\xfc\x8aH\x88\x06j\xa9'
 FILES_SALT = b'm\xa8\xb68Bj \xd1\x8e\xb8\x8e\x07\xcf\xe0\x06\x11'
+
 
 class Session:
     PUB_KEY = 0
@@ -65,6 +65,7 @@ class Session:
     STATE = 7
     CERT = 8
 
+
 class State:
     HELLO = 0
     KEY_EXCHANGE = 1
@@ -75,52 +76,6 @@ class State:
 class User:
     CC_TOKEN = 0
 
-# In authenticated DH, each party acquires a certificate for the other party.
-# The DH public key that each party sends to the other party is digitally
-# signed by the sender using the private key that corresponds to the public key on the sender’s certificate.
-# A reader might ask that if the two parties are going to use certificates anyway, why
-# not fall back on the “traditional” approach of having one of the parties encrypt a session key with the other
-# party’s public key, since, subsequently, only the other party would be able to retrieve the session key through
-# decryption with their private key. While that point is valid, DH does give you additional security because it
-# creates a shared secret without any transmission of the secret between the two parties.
-
-
-# State 0:
-#     Cliente manda Hello:
-#         Server responde com Hello
-#         com a sua pub key e id da sessao do cliente
-#
-# State 1:
-#     Cliente manda key_exchange:
-#         Server guarda a pub key do cliente
-#         e shared key
-#
-# State 2:
-#     Cliente manda Confirm:
-#         Server verifica se esta tudo bem
-#         e nao bloqueia a sessao se estiver
-#
-# State 3:
-#     Cliente é permitido fazer as outras operaçoes
-
-
-# TODO:
-# STATUS | STORY POINTS |  DESCRIPTION
-#   ✓    |      3       |    confirm
-#   ✓    |      2       |    sequential steps verification
-#   ✓    |      5       |    encrypt files in catalogo on disk 
-#   ✓    |      1       |    add user certificate to users as a key
-#   ✓    |      3       |    validate user's hashed root before operations and update on the session's root
-#   ✓    |      8       |    licencas -> certs time
-#   ✓    |      8       |    cc token 2factor with certificate
-#   ×    |      8       |    make the report
-#   ×    |      3       |    finish the authentication diagram
-#   ×    |     13       |    refactor and test all cipher algorithms
-# cert assinado com priv
-# pin cartao
-#
-# Total Story Points: 30
-
 
 class MediaServer(resource.Resource):
     isLeaf = True
@@ -128,8 +83,6 @@ class MediaServer(resource.Resource):
     first_time = False
     
     def __init__(self):
-        
-        # certificate : cc token, password
         self.users = {}
         self.sessions = {}
 
@@ -142,19 +95,15 @@ class MediaServer(resource.Resource):
         for cert in scandir('certificate'):
             self.cert, valid = self.ca.load_cert(cert)
             if not valid:
-                ## Ask CA for another Certificate
+                # Ask CA for another Certificate
                 exit(1)
             
         self.cert_pub_key = self.cert.public_key()
         
-        # password = input('Password for ceritificate: ')
-        
-        # password would keep the file safe from attackers
         with open("server_key.pem", "rb") as key_file:
             self.cert_priv_key = serialization.load_pem_private_key(
                 key_file.read(),
-                # password=password,
-                password=None,
+                password=None, # password would keep the file safe from attackers
             )
             
         kdf = PBKDF2HMAC(
@@ -163,17 +112,14 @@ class MediaServer(resource.Resource):
             salt=FILES_SALT,
             iterations=100000,
         )
-
         key = kdf.derive(b"34hvr93QLMdvmltXM9sfohbipweeqhwV2piasdnW3QIRfwpej439wueejsf")
         
         if self.first_time:
             self.encrypt_files(key)
-        
         self.decrypt_files(key)
 
 
     def encrypt_files(self, key):        
-        # Generate a random 96-bit IV.
         for obj in scandir(CATALOG_BASE + '/'):
             if obj.is_dir() or not (any(ext in obj.name for ext in ['mp3'])):
                 continue
@@ -197,7 +143,6 @@ class MediaServer(resource.Resource):
 
 
     def decrypt_files(self, key):
-        # Generate a random 96-bit IV.
         for obj in scandir(CATALOG_BASE + '/'):
             if obj.is_dir() or not (any(ext in obj.name for ext in ['mp3'])):
                 continue
@@ -250,7 +195,7 @@ class MediaServer(resource.Resource):
         licence = x509.load_pem_x509_certificate(licence)
         
         # check if the licence was really signed by the server
-        if self.ca.validate_cert_signature(licence, self.cert):
+        if not self.ca.validate_cert_signature(licence, self.cert):
             logger.debug('Licence Invalid.')
             return False
         
@@ -267,15 +212,18 @@ class MediaServer(resource.Resource):
             logger.debug("Licence Invalid.")
             return False
 
+        # check if the licence is for this ``media_id``
+        if licence.subject.get_attributes_for_oid(NameOID.TITLE)[0]._value != media_id:
+            logger.debug("Licence Invalid.")
+            return False
+
         logger.debug("Successfully validated client's licence")
         
         return True
         
         
-    # Send a media chunk to the client
     def do_download(self, session_id, media_id, chunk_id, request):
-        
-        logger.debug(f'Download: args: {media_id} {chunk_id}')
+        """Send an encrypted media chunk to the client."""
         
         logger.debug(f'Download: id: {media_id}')
 
@@ -326,6 +274,8 @@ class MediaServer(resource.Resource):
         return json.dumps({'error': 'unknown'}, indent=4).encode('latin')
 
     def encrypted_get(self, request):
+        """Handle GET requests from the client."""
+
         session_id = int(request.getHeader('Authorization'))
         session = self.sessions[session_id]
 
@@ -365,6 +315,7 @@ class MediaServer(resource.Resource):
 
 
     def encrypted_post(self, request):
+        """Handle POST requests from the client."""
         
         session_id = int(request.getHeader('Authorization'))
         session = self.sessions[session_id]
@@ -420,20 +371,15 @@ class MediaServer(resource.Resource):
                     request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                     return json.dumps({'error': 'Unauthorized'}).encode('latin')
 
-                # Create licence for this user of this media  
                 media_id = data['media_id']
                 
-                # Generate our key
-                key = rsa.generate_private_key(
-                    public_exponent=65537,
-                    key_size=2048,
-                )
-
+                # Create licence for this user of this media  
                 licence = x509.CertificateBuilder().subject_name(
                     x509.Name([
                         x509.NameAttribute(NameOID.USER_ID, binascii.b2a_base64(
                             session[Session.CERT].public_bytes(Encoding.PEM)
                         ).decode('latin').strip()),
+                        x509.NameAttribute(NameOID.TITLE, media_id),
                     ])
                 ).issuer_name(
                     x509.Name([
@@ -444,7 +390,7 @@ class MediaServer(resource.Resource):
                         x509.NameAttribute(NameOID.COMMON_NAME, u"localhost"),
                     ])
                 ).public_key(
-                    key.public_key()
+                    self.cert_pub_key
                 ).serial_number(
                     x509.random_serial_number()
                 ).not_valid_before(
@@ -452,7 +398,7 @@ class MediaServer(resource.Resource):
                 ).not_valid_after(
                     # the licence will be valid for 600 seconds
                     datetime.datetime.utcnow() + datetime.timedelta(seconds=600)
-                ).sign(key, hashes.SHA256())
+                ).sign(self.cert_priv_key, hashes.SHA256())
                 
                 # Return licence
                 licence_b = binascii.b2a_base64(licence.public_bytes(Encoding.PEM)).decode('latin').strip()
@@ -528,24 +474,32 @@ class MediaServer(resource.Resource):
                 
                 p, g, session_id = self.diffie_hellman(2, 1024)
                 
-                self.sessions[session_id][Session.CIPHER] = cipher
-                self.sessions[session_id][Session.MODE] = ciphermode
-                self.sessions[session_id][Session.DIGEST] = digest
-                self.sessions[session_id][Session.STATE] = State.HELLO
-                self.sessions[session_id][Session.CERT] = client_cert
+                session = self.sessions[session_id]
+                session[Session.CIPHER] = cipher
+                session[Session.MODE] = ciphermode
+                session[Session.DIGEST] = digest
+                session[Session.STATE] = State.HELLO
+                session[Session.CERT] = client_cert
+
+                if self.users[session[Session.CERT]][User.CC_TOKEN] == b'':
+                    factors = {0: 'None', 1: 'CC Token'}
+                else:
+                    factors = {0: 'CC Token'}
+
+                session[Session.CERT]
                 
                 return json.dumps({
                         'session_id': session_id,
                         'cipher': cipher,
                         'digest': digest,
                         'ciphermode': ciphermode,
-                        'public_key': self.sessions[session_id][Session.PUB_KEY].public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
+                        'public_key': session[Session.PUB_KEY].public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode(),
                         'parameters': {
                             'p': p,
                             'g': g,
                             'key_size': 1024,
                         },
-                        '2-factor': {'0': 'None', '1': 'CC Token'}
+                        '2-factor': factors,
                     }).encode("latin")
 
             elif request.path == b'/api/key_exchange':
