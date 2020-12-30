@@ -101,6 +101,7 @@ class Client:
             logger.error('No such method')
             return ''
         
+
     def get_message(self, path, authorization=None, content=None):
         if authorization is None:
             req = requests.get(f'{SERVER_URL}{path}')
@@ -112,6 +113,7 @@ class Client:
       
         return req.json()
         
+
     def negotiate(self):
         """(Re)start the handshake with the server."""
                 
@@ -142,16 +144,12 @@ class Client:
         
         # State HELLO
         response = self.send_message(data, 'HELLO')
-            
         data = self.handle_hello(response)
         
         # State KEY_EXCHANGE
         response = self.send_message(data, 'KEY_EXCHANGE' )
-
         data = self.decrypt_response(response)
-
         data = self.handle_key_exchange(data)
-
         data = self.encrypt_request(data)
             
         # State CONFIRM
@@ -173,10 +171,6 @@ class Client:
     
 
     def handle_hello(self, response):
-        """ DH
-        Generate shared key.
-        Sign the 
-        """
         self.cipher = response['cipher']
         self.ciphermode = response['ciphermode']
         self.digest = response['digest']
@@ -263,6 +257,8 @@ class Client:
 
     
     def diffie_hellman(self, p, g, key_size):
+        """Generate the shared key."""
+
         pn = dh.DHParameterNumbers(p, g).parameters()
 
         self.private_key = pn.generate_private_key()
@@ -278,8 +274,19 @@ class Client:
         server_public_key = load_pem_public_key(self.server_dh_pubkey)
 
         self.shared_key = self.private_key.exchange(server_public_key)
-        
-            
+    
+
+    def padding(self, block_size, data):
+        padder = padding.PKCS7(block_size).padder()
+        padded_data = padder.update(data)
+        return padded_data + padder.finalize()
+    
+    
+    def unpadder(self, block_size, data):
+        unpadder = padding.PKCS7(block_size).unpadder()
+        return unpadder.update(data) + unpadder.finalize()
+
+
     def encrypt_data(self, derived_key, data): 
         key = derived_key
 
@@ -307,17 +314,6 @@ class Client:
         encrypted_data = encryptor.update(data) + encryptor.finalize()
 
         return encrypted_data, iv
-
-
-    def padding(self, block_size, data):
-        padder = padding.PKCS7(block_size).padder()
-        padded_data = padder.update(data)
-        return padded_data + padder.finalize()
-    
-    
-    def unpadder(self, block_size, data):
-        unpadder = padding.PKCS7(block_size).unpadder()
-        return unpadder.update(data) + unpadder.finalize()
 
 
     def decrypt_data(self, derived_key, iv, data):
@@ -383,6 +379,8 @@ class Client:
     
 
     def gen_MAC(self, hmac_key, data):
+        """Concat a MAC to the end of the encrypted data."""
+
         if self.digest == 'SHA-256':
             digest = hashes.SHA256()
         elif self.digest == 'SHA-384':
@@ -397,6 +395,8 @@ class Client:
 
 
     def verify_MAC(self, hmac_key, data):
+        """Verify the data integrity."""
+
         if self.digest == 'SHA-256':
             digest = hashes.SHA256()
         elif self.digest == 'SHA-384':
@@ -420,6 +420,8 @@ class Client:
 
 
     def gen_derived_key(self, media_id=None, chunk_id=None, salt=None):
+        """Generate a new derived key and a new hmac key."""
+
         if self.digest == 'SHA-256':
             digest = hashes.SHA256()
         elif self.digest == 'SHA-384':
@@ -543,16 +545,11 @@ def main():
             }).encode('latin')
 
             content = client.encrypt_request(data)
-            
             response = requests.post(f'{SERVER_URL}/api', data=content, headers={ b"content-type": b"application/json",
                                                                                   b"Authorization": str(client.session_id)} )
-
             response = response.json()
-            
             data = client.decrypt_response(response)
-            
             licence = binascii.a2b_base64(data['licence'].encode('latin'))
-            
             client.licences[media_item["id"]] = licence
             
             data = json.dumps({
@@ -563,7 +560,6 @@ def main():
             }).encode('latin')
             
             content = client.encrypt_request(data)
-
             response = client.get_message('/api', str(client.session_id), content)
             
             if 'error' in response:
@@ -572,10 +568,9 @@ def main():
 
         media_id = response['media_id'].encode('latin')
         chunk_id = str(response['chunk_id']).encode('latin')
-        
         data = client.decrypt_response(response, media_id, chunk_id)
-
         chunk = binascii.a2b_base64(data['chunk'])
+
         try:
             proc.stdin.write(chunk)
         except:

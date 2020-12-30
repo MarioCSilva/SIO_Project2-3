@@ -162,28 +162,11 @@ class MediaServer(resource.Resource):
             ciphertext = self.unpadder(algorithms.AES.block_size, ciphertext)
             
             media_item['data'] = ciphertext
-                        
-    # Send the list of media files to clients
-    def do_list(self, session_id, request):
-        # Build list
-        media_list = []
-        for media_id in CATALOG:
-            media = CATALOG[media_id]
-            media_list.append({
-                'id': media_id,
-                'name': media['name'],
-                'description': media['description'],
-                'chunks': math.ceil(media['file_size'] / CHUNK_SIZE),
-                'duration': media['duration']
-                })
-            
-        data = json.dumps(media_list, indent=4).encode('latin')
-        
-        request.responseHeaders.addRawHeader(b"content-type", b"application/json")
-        return self.encrypt_request(session_id, data)
 
-        
+
     def check_user_licence(self, session_id, media_id, licence):
+        """Check the validity of a client's licence."""
+        
         logger.debug(f'Checking licence for media id: {media_id}')
         
         client_cert = self.sessions[session_id][Session.CERT]
@@ -220,6 +203,27 @@ class MediaServer(resource.Resource):
         logger.debug("Successfully validated client's licence")
         
         return True
+
+
+    def do_list(self, session_id, request):
+        """Send the list of media files encrypted to clients."""
+
+        # Build list
+        media_list = []
+        for media_id in CATALOG:
+            media = CATALOG[media_id]
+            media_list.append({
+                'id': media_id,
+                'name': media['name'],
+                'description': media['description'],
+                'chunks': math.ceil(media['file_size'] / CHUNK_SIZE),
+                'duration': media['duration']
+                })
+            
+        data = json.dumps(media_list, indent=4).encode('latin')
+        
+        request.responseHeaders.addRawHeader(b"content-type", b"application/json")
+        return self.encrypt_request(session_id, data)
         
         
     def do_download(self, session_id, media_id, chunk_id, request):
@@ -272,6 +276,7 @@ class MediaServer(resource.Resource):
         # File was not open?
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
         return json.dumps({'error': 'unknown'}, indent=4).encode('latin')
+
 
     def encrypted_get(self, request):
         """Handle GET requests from the client."""
@@ -416,8 +421,8 @@ class MediaServer(resource.Resource):
             return b''
             
     
-    # Handle a GET request
     def render_GET(self, request):
+        """Handle a GET request."""
         logger.debug(f'Received request for {request.uri}')
 
         try:
@@ -438,8 +443,9 @@ class MediaServer(resource.Resource):
             return b''
         
     
-    # Handle a POST request
     def render_POST(self, request):
+        """Handle a POST request."""
+
         logger.debug(f'Received POST for {request.uri}')
 
         try:
@@ -534,7 +540,7 @@ class MediaServer(resource.Resource):
                     
                     logger.debug("Client's Certificate Validated.")
                     
-                    if not self.ca.check_signature(client_cc_cert.public_key(), token, signed_token, hashes.SHA1()):
+                    if not self.ca.check_signature(client_cc_cert.public_key(), token, signed_token, hashes.SHA1(),True):
                         logger.debug("Client's Signature Invalid.")
                         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                         return json.dumps({'error': 'something went wrong'}, indent=4).encode('latin')
@@ -595,6 +601,8 @@ class MediaServer(resource.Resource):
         
         
     def choose_algorithms(self, ciphers, digests, ciphermodes):
+        """Choose the preferred algorithms according to the server's preferences."""
+
         if 'ChaCha20' in ciphers:
             cipher = '3DES'
         elif 'AES' in ciphers:
@@ -626,6 +634,8 @@ class MediaServer(resource.Resource):
                 
         
     def gen_MAC(self, session_id, hmac_key, data):
+        """Concat a MAC to the end of the encrypted data."""
+
         session = self.sessions[session_id]
 
         if session[Session.DIGEST] == 'SHA-256':
@@ -642,6 +652,8 @@ class MediaServer(resource.Resource):
 
 
     def verify_MAC(self, session_id, hmac_key, data):
+        """Verify the data integrity."""
+
         session = self.sessions[session_id]
         
         if session[Session.DIGEST] == 'SHA-256':
@@ -667,6 +679,8 @@ class MediaServer(resource.Resource):
         
         
     def gen_derived_key(self, session_id, media_id=None, chunk_id=None, salt=None):
+        """Generate a new derived key and a new hmac key."""
+
         session = self.sessions[session_id]
         
         if session[Session.DIGEST] == 'SHA-256':
@@ -702,12 +716,12 @@ class MediaServer(resource.Resource):
 
 
     def diffie_hellman(self, generator, key_size):
+        """Generate the shared key."""
+
         parameters = dh.generate_parameters(generator=generator, key_size=key_size)
-        
         private_key = parameters.generate_private_key()
         public_key = private_key.public_key()
 
-        # TODO: Check concurrency here...
         session_id = self.cur_session_id
         self.cur_session_id += 1
         self.sessions[session_id] = [None] * 10

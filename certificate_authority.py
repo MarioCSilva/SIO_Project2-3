@@ -130,7 +130,7 @@ class CA:
                 padding.PKCS1v15(),
                 cert.signature_hash_algorithm,
             )
-        except cryptography.exceptions.InvalidSignature:
+        except:
             return False
 
         for crl in self.crl_certs:
@@ -180,18 +180,22 @@ class CA:
         )
         
 
-    def check_signature(self, public_key, message, signature, digest) -> bool:
+    def check_signature(self, public_key, message, signature, digest, isclient=False) -> bool:
         """Validate a signature given a private key and the original message."""
+
         try:
+            pd = padding.PSS(
+                mgf=padding.MGF1(digest),
+                salt_length=padding.PSS.MAX_LENGTH
+            )
+            if isclient:
+                pd = padding.PKCS1v15()
             public_key.verify(
                 signature,
                 message,
-                padding.PSS(
-                    mgf=padding.MGF1(digest),
-                    salt_length=padding.PSS.MAX_LENGTH
-                ),
+                pd,
                 digest
             )
-        except InvalidSignature:
+        except:
             return False
         return True
