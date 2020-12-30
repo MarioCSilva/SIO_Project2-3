@@ -74,7 +74,6 @@ class State:
 
 class User:
     CC_TOKEN = 0
-    LICENCES = 1
 
 # In authenticated DH, each party acquires a certificate for the other party.
 # The DH public key that each party sends to the other party is digitally
@@ -239,11 +238,10 @@ class MediaServer(resource.Resource):
         return self.encrypt_request(session_id, data)
 
         
-    def check_user_licences(self, session_id, media_id, licence):
+    def check_user_licence(self, session_id, media_id, licence):
         logger.debug(f'Checking licence for media id: {media_id}')
         
         client_cert = self.sessions[session_id][Session.CERT]
-        licences = self.users[client_cert][User.LICENCES]
 
         if licence == b'':
             logger.debug('Client has no licence for this media.')
@@ -253,29 +251,24 @@ class MediaServer(resource.Resource):
         
         # check if the licence was really signed by the server
         if self.ca.validate_cert_signature(licence, self.cert):
-            logger.debug('Client has an invalid licence for this media.')
+            logger.debug('Licence Invalid.')
             return False
         
         # check time validity of certificate here
-        # validate(licences[media_id])
-        now = datetime.datetime.now()
-        
-        if licence.not_valid_after < now:
+        if licence.not_valid_after < datetime.datetime.now():
+            logger.debug("Licence Invalid.")
+            return False
+
+        # check if the license belongs to the user
+        subject_user_id = licence.subject.get_attributes_for_oid(NameOID.USER_ID)[0]._value
+        if subject_user_id != binascii.b2a_base64(
+            self.sessions[session_id][Session.CERT].public_bytes(Encoding.PEM)
+        ).decode('latin').strip():
             logger.debug("Licence Invalid.")
             return False
 
         logger.debug("Successfully validated client's licence")
         
-        # Check if the licence is already stored in server
-        # It should be and if it is check if it's equal to it
-        if media_id in licences:
-            if licences[media_id] != licence:
-                logger.debug('Client has an invalid licence for this media.')
-                return False
-        # if it was lost somehow, just store it
-        else:
-            licences[media_id] = licence
-    
         return True
         
         
@@ -361,7 +354,7 @@ class MediaServer(resource.Resource):
                 return json.dumps({'error': 'unauthorized'}).encode('latin')
 
             # On the first chunk check if the licence that the client sent is valid
-            if data['chunk_id'] == 0 and not self.check_user_licences(session_id, data['media_id'], binascii.a2b_base64(data['licence'].encode('latin'))):
+            if data['chunk_id'] == 0 and not self.check_user_licence(session_id, data['media_id'], binascii.a2b_base64(data['licence'].encode('latin'))):
                 request.setResponseCode(401)
                 request.responseHeaders.addRawHeader(b"content-type", b"application/json")
                 return json.dumps({'error': 'unauthorized'}).encode('latin')
@@ -436,19 +429,20 @@ class MediaServer(resource.Resource):
                     key_size=2048,
                 )
 
-                # Various details about who we are. For a self-signed certificate the
-                # subject and issuer are always the same.
-                subject = issuer = x509.Name([
-                    x509.NameAttribute(NameOID.COUNTRY_NAME, u"PT"),
-                    x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"Aveiro"),
-                    x509.NameAttribute(NameOID.LOCALITY_NAME, u"Aveiro"),
-                    x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"UA"),
-                    x509.NameAttribute(NameOID.COMMON_NAME, u"localhost"),
-                ])
                 licence = x509.CertificateBuilder().subject_name(
-                    subject
+                    x509.Name([
+                        x509.NameAttribute(NameOID.USER_ID, binascii.b2a_base64(
+                            session[Session.CERT].public_bytes(Encoding.PEM)
+                        ).decode('latin').strip()),
+                    ])
                 ).issuer_name(
-                    issuer
+                    x509.Name([
+                        x509.NameAttribute(NameOID.COUNTRY_NAME, u"PT"),
+                        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"Aveiro"),
+                        x509.NameAttribute(NameOID.LOCALITY_NAME, u"Aveiro"),
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"UA"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, u"localhost"),
+                    ])
                 ).public_key(
                     key.public_key()
                 ).serial_number(
@@ -459,9 +453,6 @@ class MediaServer(resource.Resource):
                     # the licence will be valid for 600 seconds
                     datetime.datetime.utcnow() + datetime.timedelta(seconds=600)
                 ).sign(key, hashes.SHA256())
-
-                # Store licence in users dict
-                self.users[session[Session.CERT]][User.LICENCES][media_id] = licence
                 
                 # Return licence
                 licence_b = binascii.b2a_base64(licence.public_bytes(Encoding.PEM)).decode('latin').strip()
@@ -522,7 +513,6 @@ class MediaServer(resource.Resource):
                 if client_cert not in self.users:
                     self.users[client_cert] = [0]*2
                     self.users[client_cert][User.CC_TOKEN] = b''
-                    self.users[client_cert][User.LICENCES] = {}
                     logger.info('Registering client...')
                 
                 ciphers = data['ciphers']
